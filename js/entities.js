@@ -29,14 +29,13 @@ const drops = [];
 function spawnDrop(id, n, x, y, z, o = {}) {
   if (!id || n <= 0) return;
   const flat = isFlatItem(id), mesh = new THREE.Mesh(flat ? planeGeo : cachedBlockGeo(id), flat ? flatItemMaterial(id) : dropBlockMat);
-  mesh.scale.setScalar(flat ? .42 : .26); if (!flat) mesh.layers.enable(2); scene.add(mesh);
+  mesh.scale.setScalar(flat ? .42 : .26); mesh.castShadow = true; scene.add(mesh);
   drops.push({ id, n, dur: o.dur || 0, pos: new THREE.Vector3(x, y, z), vel: o.vel || new THREE.Vector3((Math.random() - .5) * 2.4, 3 + Math.random() * 1.5, (Math.random() - .5) * 2.4),
     onGround: false, age: 0, delay: o.delay ?? .35, mesh, phase: Math.random() * 6 });
 }
 const dropStack = (s, x, y, z, o = {}) => { if (s) spawnDrop(s.id, s.n, x, y, z, Object.assign({ dur: s.dur }, o)); };
 function removeDrop(i) { scene.remove(drops[i].mesh); drops.splice(i, 1); }
 function updateDrops(dt, light) {
-  dropBlockMat.color.setScalar(light);
   for (let i = drops.length - 1; i >= 0; i--) {
     const d = drops[i]; d.age += dt;
     if (d.age > 300 || d.pos.y < -20) { removeDrop(i); continue; }
@@ -85,15 +84,15 @@ function dropBlockItems(x, y, z, id, popped) {
 }
 
 // ---------- mobs ----------
-const mobs = [];
+const mobs = [], HURT_TINT = new THREE.Color(1, .25, .2);
 const MOB = {
   pig: { hp: 10, hw: .42, hh: .9, speed: 1.3, passive: true, name: '돼지', drops: () => [[I.PORK_RAW, rnd(1, 3)]] },
   sheep: { hp: 8, hw: .42, hh: 1.25, speed: 1.2, passive: true, name: '양', drops: () => [[B.WOOL_WHITE, rnd(1, 2)], [I.MUTTON_RAW, rnd(1, 2)]] },
   zombie: { hp: 20, hw: .3, hh: 1.9, speed: 2.1, passive: false, name: '좀비', drops: () => [[I.ROTTEN, rnd(0, 2)], ...(Math.random() < .03 ? [[I.IRON_INGOT, 1]] : [])] },
 };
 function part(m, w, h, d, color, x, y, z, parent) {
-  const mat = new THREE.MeshBasicMaterial({ color, vertexColors: true }); mat.userData.base = new THREE.Color(color); m.mats.push(mat);
-  const mesh = new THREE.Mesh(shadedBox(w, h, d), mat); mesh.position.set(x, y, z); mesh.layers.enable(2); (parent || m.g).add(mesh); return mesh;
+  const mat = patchVoxel(new THREE.MeshStandardMaterial({ color, roughness: .85 }), false, m.vox); mat.userData.base = new THREE.Color(color); m.mats.push(mat);
+  const mesh = new THREE.Mesh(shadedBox(w, h, d), mat); mesh.position.set(x, y, z); mesh.castShadow = mesh.receiveShadow = true; (parent || m.g).add(mesh); return mesh;
 }
 function limb(m, w, h, d, color, x, y, z) { const g = new THREE.Group(); g.position.set(x, y, z); part(m, w, h, d, color, 0, -h / 2, 0, g); m.g.add(g); return g; }
 function buildModel(m) {
@@ -118,7 +117,7 @@ function buildModel(m) {
   }
 }
 function spawnMob(type, x, y, z) {
-  const t = MOB[type], m = { type, t, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), onGround: false, yaw: Math.random() * 6.28, tYaw: 0, walk: false,
+  const t = MOB[type], m = { type, t, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), onGround: false, yaw: Math.random() * 6.28, tYaw: 0, walk: false, vox: { value: new THREE.Vector4(1, 1, 0, 1) },
     timer: 0, hp: t.hp, hurt: 0, flee: 0, phase: 0, atk: 0, burn: 0, fireT: 0, g: new THREE.Group(), mats: [], legs: [], arms: null };
   m.tYaw = m.yaw; buildModel(m); scene.add(m.g); mobs.push(m); return m;
 }
@@ -210,8 +209,8 @@ function updateMobs(dt, daylight) {
     if (m.legs.length === 4) { m.legs[0].rotation.x = m.legs[3].rotation.x = sw; m.legs[1].rotation.x = m.legs[2].rotation.x = -sw; }
     else { m.legs[0].rotation.x = sw; m.legs[1].rotation.x = -sw; m.arms[0].rotation.x = -Math.PI / 2 + sw * .2 - (m.atk > .8 ? .5 : 0); m.arms[1].rotation.x = -Math.PI / 2 - sw * .2 - (m.atk > .8 ? .5 : 0); }
     m.g.position.copy(m.pos); m.g.rotation.y = m.yaw;
-    const l = lightAt(m.pos.x, m.pos.y + .5, m.pos.z, daylight);
-    for (const mat of m.mats) { mat.color.copy(mat.userData.base).multiplyScalar(l); if (m.hurt > 0 || m.burn > 0) mat.color.lerp(new THREE.Color(1, .25, .2), m.hurt > 0 ? .55 : .25); }
+    cellVox(m.pos.x, m.pos.y + .5, m.pos.z, m.vox.value);
+    for (const mat of m.mats) { mat.color.copy(mat.userData.base); if (m.hurt > 0 || m.burn > 0) mat.color.lerp(HURT_TINT, m.hurt > 0 ? .55 : .25); }
   }
 }
 function rayBox(o, d, min, max) {
@@ -232,8 +231,8 @@ function mobOnRay(o, d, maxT) {
 // ---------- TNT ----------
 const tnts = []; let shake = 0;
 function primeTNT(x, y, z, fuse = 2.5) {
-  const mat = new THREE.MeshBasicMaterial({ map: tex, vertexColors: true });
-  const m = new THREE.Mesh(cachedBlockGeo(B.TNT), mat); m.position.set(x + .5, y + .5, z + .5); m.layers.enable(2); scene.add(m);
+  const mat = patchVoxel(new THREE.MeshStandardMaterial({ map: tex, roughness: .8 }), false, dropVox);
+  const m = new THREE.Mesh(cachedBlockGeo(B.TNT), mat); m.position.set(x + .5, y + .5, z + .5); m.castShadow = true; scene.add(m);
   tnts.push({ t: fuse, m, mat, vy: 2 }); tone(900, 200, .5, .05, 'sawtooth');
 }
 function updateTNT(dt, light) {
@@ -241,7 +240,7 @@ function updateTNT(dt, light) {
     const t = tnts[i]; t.t -= dt;
     t.vy -= 20 * dt; const ny = t.m.position.y + t.vy * dt;
     if (BLOCKS[getBlock(Math.floor(t.m.position.x), Math.floor(ny - .5), Math.floor(t.m.position.z))].solid) { t.vy = 0; t.m.position.y = Math.floor(ny - .5) + 1.5; } else t.m.position.y = ny;
-    t.mat.color.setScalar(Math.floor(t.t * 6) % 2 === 0 ? 2.2 : light);
+    t.mat.emissive.setScalar(Math.floor(t.t * 6) % 2 === 0 ? 1.4 : 0);
     t.m.scale.setScalar(1 + Math.max(0, .4 - t.t) * .5);
     if (t.t <= 0) { tnts.splice(i, 1); scene.remove(t.m); t.mat.dispose(); explode(t.m.position.x, t.m.position.y, t.m.position.z, 3.6); }
   }

@@ -2,7 +2,8 @@
 // ============================================================
 //  Blockcraft — core: constants, noise, block/item/recipe registries
 // ============================================================
-const CS = 16, H = 112, WATER = 32, DAY_LEN = 720;
+const CS = 16, H = 112, WATER = 32, DAY_LEN = 1200;      // one day = 20 minutes
+const GOLDEN_HOUR = 0.465, TIME_FAST = 60;              // new worlds start in late-afternoon light; T runs time 60x
 const SAVE_KEY = 'blockcraft-save-v2', SET_KEY = 'blockcraft-settings-v2';
 const isTouch = matchMedia('(pointer: coarse)').matches || ('ontouchstart' in window && !matchMedia('(pointer: fine)').matches);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;

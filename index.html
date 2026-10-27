@@ -185,6 +185,7 @@ label.set output { font: 10px var(--font-pixel); color: var(--gold); }
       <div class="setrow">게임 모드<div class="seg" id="modeSeg"><button type="button" data-v="survival">서바이벌</button><button type="button" data-v="creative">크리에이티브</button></div></div>
       <div class="setrow">난이도<div class="seg" id="diffSeg"><button type="button" data-v="0">평화로움</button><button type="button" data-v="1">보통</button><button type="button" data-v="2">어려움</button></div></div>
       <div class="setrow">그림자 효과<div class="seg" id="shadowSeg"><button type="button" data-v="1">켜기</button><button type="button" data-v="0">끄기</button></div></div>
+      <label class="set">노출 (화면 밝기)<output id="expOut">1.00</output><input type="range" id="exposure" min="0.5" max="1.5" step="0.05" value="1"></label>
       <label class="set">시야 거리 (청크)<output id="rdOut">6</output><input type="range" id="rd" min="2" max="12" step="1" value="6"></label>
       <label class="set">마우스 감도<output id="sensOut">1.0</output><input type="range" id="sens" min="0.2" max="3" step="0.1" value="1"></label>
     </div>
@@ -197,6 +198,7 @@ label.set output { font: 10px var(--font-pixel); color: var(--gold); }
         <dt>우클릭</dt><dd>놓기 · 먹기/마시기 · 상자·작업대 열기</dd>
         <dt>E · Q</dt><dd>가방과 제작 · 버리기 · 휠클릭 블록 집기</dd>
         <dt>1-9 휠</dt><dd>핫바 선택 · F3 디버그 정보</dd>
+        <dt>T</dt><dd>누르고 있으면 시간 빨리감기</dd>
       </dl>
     </div>
     <div class="card" id="helpTouch" hidden>
@@ -246,16 +248,7 @@ label.set output { font: 10px var(--font-pixel); color: var(--gold); }
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="js/core.js"></script>
-<script src="js/textures.js"></script>
-<script src="js/render.js"></script>
-<script src="js/world.js"></script>
-<script src="js/mesher.js"></script>
-<script src="js/entities.js"></script>
-<script src="js/player.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/invui.js"></script>
-<script src="js/main.js"></script>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }</script>
+<script type="module" src="js/boot.js"></script>
 </body>
 </html>

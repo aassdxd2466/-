@@ -31,7 +31,7 @@ function initWorld(seed, data) {
     saplings = new Map(data.saplings || []);
     inv = Array.from({ length: 36 }, (_, i) => validStack(data.inv && data.inv[i]));
     sel = clamp(data.sel | 0, 0, 8); gameMode = data.gameMode === 'creative' ? 'creative' : 'survival'; difficulty = clamp(data.difficulty ?? 1, 0, 2);
-    furnaceFuel = +data.furnaceFuel || 0; time = typeof data.time === 'number' ? data.time : .05;
+    furnaceFuel = +data.furnaceFuel || 0; time = typeof data.time === 'number' ? data.time : GOLDEN_HOUR;
     for (const [k, e] of Object.entries(data.effects || {})) if (EFFECTS[k] && e && e.t > 0) effects[k] = { t: +e.t, lv: e.lv | 0 || 1, max: +e.max || +e.t };
     const p = data.p || {};
     player.spawn = Array.isArray(p.spawn) ? p.spawn : findSpawn();
@@ -40,7 +40,7 @@ function initWorld(seed, data) {
     Object.assign(player, { hp: p.dead ? 20 : clamp(+p.hp || 20, 1, 20), food: p.dead ? 20 : clamp(p.food ?? 20, 0, 20), sat: +p.sat || 5, exh: 0, air: clamp(p.air ?? 10, 0, 10), fire: +p.fire || 0 });
   } else {
     const [sx, sz] = findSpawn();
-    player.spawn = [sx, sz]; player.pos.set(sx, H, sz); player.yaw = Math.PI * .25; player.pitch = -.15; player.spawnPending = true; time = .05;
+    player.spawn = [sx, sz]; player.pos.set(sx, H, sz); player.yaw = Math.PI * .25; player.pitch = -.15; player.spawnPending = true; time = GOLDEN_HOUR;
     Object.assign(player, { hp: 20, food: 20, sat: 5, exh: 0, air: 10, fire: 0 });
     if (gameMode === 'creative') CREATIVE_START.forEach((id, i) => inv[i] = { id, n: maxStack(id), dur: 0 });
   }
@@ -72,7 +72,7 @@ function frame(now) {
       } : { fw: 0, st: 0 };
       updatePlayer(dt, ctl);
     }
-    time = (time + dt / DAY_LEN) % 1;
+    time = (time + dt / DAY_LEN * (keys.KeyT && mode === 'play' ? TIME_FAST : 1)) % 1;
     updateFluids(now); updateSaplings(dt);
   }
 
@@ -101,13 +101,13 @@ function frame(now) {
   if (aim) { selBox.visible = true; selBox.position.set(aim.x + .5, aim.y + .5, aim.z + .5); } else selBox.visible = false;
 
   if (!paused) { updateMobs(dt, daylight); updateTNT(dt, pl); updateDrops(dt, pl); updateParticles(dt, pl); }
-  updateHand(dt, hv, player.onGround, pl, !!using);
+  updateHand(dt, hv, player.onGround, eye, !!using);
 
   if (invDirty) { invDirty = false; renderHotbar(); renderInventory(); }
   renderStats(); renderVignette(dt);
   if ((uiTick -= dt) <= 0) { uiTick = .25; renderEffects(); updateTouchButtons(); }
 
-  renderShadows(player.pos.x, player.pos.y, player.pos.z, player.yaw, hv, !player.dead);
+  updateSunShadow(player.pos.x, player.pos.y, player.pos.z, player.yaw, hv, !player.dead);
   renderer.clear();
   renderer.render(scene, camera);
   if (mode === 'play' && !player.dead) { renderer.clearDepth(); renderer.render(handScene, handCam); }

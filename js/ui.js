@@ -122,8 +122,11 @@ const rd = $('rd'), sens = $('sens'); let sensitivity = 1;
 function applySettings() { rd.value = renderDist; $('rdOut').textContent = renderDist; sens.value = sensitivity; $('sensOut').textContent = sensitivity.toFixed(1); }
 rd.addEventListener('input', () => { renderDist = +rd.value; $('rdOut').textContent = renderDist; lastChunkScan = 0; saveSettings(); });
 sens.addEventListener('input', () => { sensitivity = +sens.value; $('sensOut').textContent = sensitivity.toFixed(1); saveSettings(); });
-function saveSettings() { try { localStorage.setItem(SET_KEY, JSON.stringify({ renderDist, sensitivity, shadows: SHADOW.on })); } catch (e) { } }
-try { const s = JSON.parse(localStorage.getItem(SET_KEY) || 'null'); if (s) { renderDist = clamp(s.renderDist | 0 || renderDist, 2, 12); sensitivity = +s.sensitivity || 1; if (s.shadows === false) setShadowQuality(false); } } catch (e) { }
+function saveSettings() { try { localStorage.setItem(SET_KEY, JSON.stringify({ renderDist, sensitivity, shadows: SHADOW.on, exposure: renderer.toneMappingExposure })); } catch (e) { } }
+const expo = $('exposure');
+function setExposure(v) { renderer.toneMappingExposure = clamp(+v || 1, 0.5, 1.5); expo.value = renderer.toneMappingExposure; $('expOut').textContent = renderer.toneMappingExposure.toFixed(2); }
+expo.addEventListener('input', () => { setExposure(expo.value); saveSettings(); });
+try { const s = JSON.parse(localStorage.getItem(SET_KEY) || 'null'); if (s) { renderDist = clamp(s.renderDist | 0 || renderDist, 2, 12); sensitivity = +s.sensitivity || 1; if (s.shadows === false) setShadowQuality(false); if (s.exposure) setExposure(s.exposure); } } catch (e) { }
 applySettings();
 if (isTouch) { document.body.classList.add('touch'); $('helpDesk').hidden = true; $('helpTouch').hidden = false; $('invHint').textContent = '칸을 눌러 집고 다른 칸을 눌러 놓으세요.'; }
 const SPLASHES = ['끝없이 펼쳐지는 월드!', '좀비는 햇빛을 싫어해요!', 'TNT 조심!', '다이아몬드는 깊은 곳에', '횃불로 동굴을 밝히세요', '물약을 양조해 보세요!', '양털은 염색할 수 있어요'];
@@ -142,7 +145,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyF') toggleFly();
   if (e.code === 'KeyE') openInventory(null);
   if (e.code === 'KeyQ') dropHeld(e.shiftKey);
-  if (e.code === 'KeyT' && gameMode === 'creative') { time = (time + .25) % 1; showToast('시간이 흘렀습니다'); }
+  if (e.code === 'KeyT') showToast('T를 누르고 있는 동안 시간이 빨리 흐릅니다');
   if (e.code === 'F3' || e.code === 'Backquote') { showDebug = !showDebug; $('debug').hidden = !showDebug; }
   if (e.code.startsWith('Digit')) { const n = +e.code.slice(5); if (n >= 1 && n <= 9) selectSlot(n - 1); }
 });
