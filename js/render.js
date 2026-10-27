@@ -16,15 +16,52 @@ tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.ge
 // block light level -> brightness (each step dims by ~18%)
 const LIGHT_CURVE = Array.from({ length: 16 }, (_, l) => l ? Math.pow(0.82, 15 - l) : 0);
 
-// Chunk shader: light attribute = (ambient occlusion * face shade, sky light, block light)
-const VOXEL_VS = `attribute vec3 light; varying vec2 vUv; varying vec3 vL; varying float vDepth;
-void main() { vUv = uv; vL = light; vec4 mv = modelViewMatrix * vec4(position, 1.0); vDepth = -mv.z; gl_Position = projectionMatrix * mv; }`;
-const VOXEL_FS = `uniform sampler2D map; uniform float daylight, minLight, nightVision, alphaTest, opacity; uniform vec3 fogColor; uniform float fogNear, fogFar;
-varying vec2 vUv; varying vec3 vL; varying float vDepth;
+// ---------- cloud layer data (also used for cloud shadows on the ground) ----------
+const CLOUD_Y = 128, CLOUD_CELL = 12, CLOUD_THICK = 4, CLOUD_N = 64, CLOUD_TILE = CLOUD_N * CLOUD_CELL;
+// shadow mask: the 64x64 cloud cells upscaled 4x and blurred so cloud shadows get soft edges
+const CLOUD_SHADOW_RES = 256;
+const cloudCanvas = document.createElement('canvas'); cloudCanvas.width = cloudCanvas.height = CLOUD_SHADOW_RES;
+const cloudShadowTex = new THREE.CanvasTexture(cloudCanvas);
+cloudShadowTex.wrapS = cloudShadowTex.wrapT = THREE.RepeatWrapping; cloudShadowTex.flipY = false;
+cloudShadowTex.magFilter = cloudShadowTex.minFilter = THREE.LinearFilter; cloudShadowTex.generateMipmaps = false;
+
+// ---------- sun shadow state shared by every voxel material ----------
+const SHADOW = { on: true, size: isTouch ? 1024 : 2048, range: isTouch ? 40 : 64 };
+const sunDir = new THREE.Vector3(0, 1, 0), shadowCenter = new THREE.Vector3(), shadowMatrix = new THREE.Matrix4(), cloudOffset = new THREE.Vector2();
+const shadowTarget = new THREE.WebGLRenderTarget(SHADOW.size, SHADOW.size, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
+
+// Chunk shader. light attribute = (ambient occlusion * face shade, sky light, block light, 1 for one-sided faces)
+// Sunlight is the sky term; it is dimmed on faces turned away from the sun, in the shadow map and under clouds.
+const VOXEL_VS = `attribute vec4 light; varying vec2 vUv; varying vec4 vL; varying float vDepth; varying vec3 vWorld;
+void main() { vUv = uv; vL = light; vec4 wp = modelMatrix * vec4(position, 1.0); vWorld = wp.xyz; vec4 mv = viewMatrix * wp; vDepth = -mv.z; gl_Position = projectionMatrix * mv; }`;
+const VOXEL_FS = `#include <packing>
+uniform sampler2D map, shadowMap, cloudMap;
+uniform float daylight, minLight, nightVision, alphaTest, opacity, fogNear, fogFar;
+uniform float sunStrength, useShadowMap, shadowTexel, shadowRange, cloudY, cloudScale, cloudShadow;
+uniform vec3 fogColor, sunDir, shadowCenter; uniform vec2 cloudOffset; uniform mat4 shadowMatrix;
+varying vec2 vUv; varying vec4 vL; varying float vDepth; varying vec3 vWorld;
+float occluded(vec2 uv, float z) { return step(unpackRGBAToDepth(texture2D(shadowMap, uv)), z); }
+float shadowAmount(vec3 n) {
+  vec3 c = (shadowMatrix * vec4(vWorld + n * 0.07, 1.0)).xyz;
+  if (c.x <= 0.0 || c.x >= 1.0 || c.y <= 0.0 || c.y >= 1.0 || c.z >= 1.0) return 0.0;
+  float z = c.z - 0.0004, d = shadowTexel * 0.75;
+  return (occluded(c.xy, z) + occluded(c.xy + vec2(d, d), z) + occluded(c.xy + vec2(-d, d), z) + occluded(c.xy + vec2(d, -d), z) + occluded(c.xy + vec2(-d, -d), z)) / 5.0;
+}
 void main() {
   vec4 t = texture2D(map, vUv);
   if (t.a < alphaTest) discard;
-  float sky = vL.g * daylight, bl = vL.b;
+  float sun = 1.0;
+  if (sunStrength > 0.0 && vL.g > 0.0) {
+    vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+    float ndl = dot(n, sunDir);
+    if (vL.a < 0.5 && ndl < 0.0) { n = -n; ndl = -ndl; }
+    float vis = 1.0 - (1.0 - smoothstep(0.0, 0.3, ndl)) * 0.6;
+    if (useShadowMap > 0.5 && ndl > 0.0) vis *= 1.0 - shadowAmount(n) * (1.0 - smoothstep(shadowRange * 0.7, shadowRange * 0.92, distance(vWorld.xz, shadowCenter.xz)));
+    vec2 cp = vWorld.xz + sunDir.xz * ((cloudY - vWorld.y) / max(sunDir.y, 0.25));
+    vis *= 1.0 - texture2D(cloudMap, (cp - cloudOffset) * cloudScale).a * cloudShadow;
+    sun = 1.0 - sunStrength * (1.0 - vis);
+  }
+  float sky = vL.g * daylight * sun, bl = vL.b;
   float l = mix(max(max(sky, bl), minLight), 1.0, nightVision);
   float warm = clamp((bl - sky) * 1.6, 0.0, 1.0) * (1.0 - nightVision);
   vec3 c = t.rgb * vL.r * l * mix(vec3(1.0), vec3(1.1, 0.92, 0.72), warm);
@@ -32,9 +69,15 @@ void main() {
 }`;
 function voxelMaterial(o) {
   return new THREE.ShaderMaterial({
-    uniforms: { map: { value: tex }, daylight: { value: 1 }, minLight: { value: .09 }, nightVision: { value: 0 }, alphaTest: { value: o.alphaTest }, opacity: { value: o.opacity },
-      fogColor: { value: new THREE.Color() }, fogNear: { value: 50 }, fogFar: { value: 100 } },
-    vertexShader: VOXEL_VS, fragmentShader: VOXEL_FS, transparent: !!o.transparent, depthWrite: !o.transparent, side: o.side || THREE.FrontSide,
+    uniforms: {
+      map: { value: tex }, daylight: { value: 1 }, minLight: { value: .09 }, nightVision: { value: 0 }, alphaTest: { value: o.alphaTest }, opacity: { value: o.opacity },
+      fogColor: { value: new THREE.Color() }, fogNear: { value: 50 }, fogFar: { value: 100 },
+      shadowMap: { value: shadowTarget.texture }, shadowMatrix: { value: shadowMatrix }, sunDir: { value: sunDir }, shadowCenter: { value: shadowCenter },
+      sunStrength: { value: 0 }, useShadowMap: { value: 0 }, shadowTexel: { value: 1 / SHADOW.size }, shadowRange: { value: SHADOW.range },
+      cloudMap: { value: cloudShadowTex }, cloudY: { value: CLOUD_Y }, cloudScale: { value: 1 / CLOUD_TILE }, cloudShadow: { value: .7 }, cloudOffset: { value: cloudOffset },
+    },
+    vertexShader: VOXEL_VS, fragmentShader: VOXEL_FS, extensions: { derivatives: true },
+    transparent: !!o.transparent, depthWrite: !o.transparent, side: o.side || THREE.FrontSide,
   });
 }
 const chunkMat = voxelMaterial({ alphaTest: .5, opacity: 1 });
@@ -52,42 +95,137 @@ sun.renderOrder = moon.renderOrder = -2;
 const starGeo = new THREE.BufferGeometry(); { const a = []; const r = mulberry32(42); for (let i = 0; i < 900; i++) { const u = r() * 2 - 1, th = r() * Math.PI * 2, s = Math.sqrt(1 - u * u); a.push(s * Math.cos(th) * 500, u * 500, s * Math.sin(th) * 500); } starGeo.setAttribute('position', new THREE.Float32BufferAttribute(a, 3)); }
 const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, transparent: true, fog: false, depthWrite: false });
 const stars = new THREE.Points(starGeo, starMat); stars.renderOrder = -3; scene.add(stars);
-const cloudCanvas = document.createElement('canvas'); cloudCanvas.width = cloudCanvas.height = 64;
-const cloudTex = new THREE.CanvasTexture(cloudCanvas); cloudTex.magFilter = cloudTex.minFilter = THREE.NearestFilter; cloudTex.wrapS = cloudTex.wrapT = THREE.RepeatWrapping; cloudTex.generateMipmaps = false;
-const CLOUD_SIZE = 64 * 14;
-const cloudMat = new THREE.MeshBasicMaterial({ map: cloudTex, transparent: true, opacity: 0.82, side: THREE.DoubleSide, depthWrite: false });
-const clouds = new THREE.Mesh(new THREE.PlaneGeometry(CLOUD_SIZE, CLOUD_SIZE), cloudMat); clouds.rotation.x = -Math.PI / 2; scene.add(clouds);
-function paintClouds(seed) {
-  const x = cloudCanvas.getContext('2d'), n = new Perlin(seed + 99), img = x.createImageData(64, 64);
-  for (let j = 0; j < 64; j++) for (let i = 0; i < 64; i++) {
-    const a = i / 64 * Math.PI * 2, b = j / 64 * Math.PI * 2; // tileable via torus mapping
-    const v = n.noise(Math.cos(a) * 2 + 9, Math.sin(a) * 2 + Math.cos(b) * 2, Math.sin(b) * 2) + .5 * n.noise(Math.cos(a) * 5, Math.sin(a) * 5 + Math.cos(b) * 5, Math.sin(b) * 5 + 3);
-    const k = (j * 64 + i) * 4; img.data[k] = img.data[k + 1] = img.data[k + 2] = 255; img.data[k + 3] = v > .18 ? 255 : 0;
+// ---------- 3D clouds: one 64x64 cell tile of extruded boxes, repeated around the player ----------
+const CLOUD_VS = `attribute float shade; varying float vShade; varying float vDist;
+void main() { vShade = shade; vec4 wp = modelMatrix * vec4(position, 1.0); vDist = length(wp.xz - cameraPosition.xz); gl_Position = projectionMatrix * viewMatrix * wp; }`;
+const CLOUD_FS = `uniform vec3 cloudColor, fogColor; uniform float fadeNear, fadeFar; varying float vShade; varying float vDist;
+void main() { float f = smoothstep(fadeNear, fadeFar, vDist); gl_FragColor = vec4(mix(cloudColor * vShade, fogColor, f * 0.6), 1.0 - f); }`;
+const cloudMat = new THREE.ShaderMaterial({
+  uniforms: { cloudColor: { value: new THREE.Color(1, 1, 1) }, fogColor: { value: new THREE.Color() }, fadeNear: { value: 160 }, fadeFar: { value: 480 } },
+  vertexShader: CLOUD_VS, fragmentShader: CLOUD_FS, transparent: true, depthWrite: true,
+});
+const cloudGroup = new THREE.Group(); scene.add(cloudGroup);
+const cloudTiles = [], cloudBits = new Uint8Array(CLOUD_N * CLOUD_N);
+const cloudAt = (i, j) => cloudBits[((j + CLOUD_N) % CLOUD_N) * CLOUD_N + ((i + CLOUD_N) % CLOUD_N)];
+function buildCloudGeometry() {
+  const P = [], S = [], Ix = [];
+  for (let j = 0; j < CLOUD_N; j++) for (let i = 0; i < CLOUD_N; i++) {
+    if (!cloudAt(i, j)) continue;
+    for (const f of FACES) {
+      const [dx, dy, dz] = f.dir;
+      if (!dy && cloudAt(i + dx, j + dz)) continue; // side hidden by the next cloud cell
+      const shade = dy > 0 ? 1 : dy < 0 ? .74 : dx ? .86 : .93, b = P.length / 3;
+      for (const c of f.c) { P.push((i + c[0]) * CLOUD_CELL, c[1] * CLOUD_THICK, (j + c[2]) * CLOUD_CELL); S.push(shade); }
+      Ix.push(b, b + 1, b + 2, b + 2, b + 1, b + 3);
+    }
   }
-  x.putImageData(img, 0, 0); cloudTex.needsUpdate = true;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setAttribute('shade', new THREE.Float32BufferAttribute(S, 1));
+  g.setIndex(Ix); g.computeBoundingSphere(); return g;
+}
+function paintClouds(seed) {
+  const n = new Perlin(seed + 99);
+  for (let j = 0; j < CLOUD_N; j++) for (let i = 0; i < CLOUD_N; i++) {
+    const a = i / CLOUD_N * Math.PI * 2, b = j / CLOUD_N * Math.PI * 2; // tileable via torus mapping
+    const v = n.noise(Math.cos(a) * 2 + 9, Math.sin(a) * 2 + Math.cos(b) * 2, Math.sin(b) * 2) + .5 * n.noise(Math.cos(a) * 5, Math.sin(a) * 5 + Math.cos(b) * 5, Math.sin(b) * 5 + 3);
+    cloudBits[j * CLOUD_N + i] = v > .18 ? 1 : 0;
+  }
+  const R = CLOUD_SHADOW_RES, k = R / CLOUD_N;
+  let m = new Float32Array(R * R);
+  for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) m[y * R + x] = cloudBits[((y / k) | 0) * CLOUD_N + ((x / k) | 0)];
+  for (let pass = 0; pass < 2; pass++) { // wrap-around box blur
+    const o = new Float32Array(R * R);
+    for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) { let s = 0; for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) s += m[((y + dy + R) % R) * R + ((x + dx + R) % R)]; o[y * R + x] = s / 25; }
+    m = o;
+  }
+  const ctx = cloudCanvas.getContext('2d'), img = ctx.createImageData(R, R);
+  for (let i = 0; i < R * R; i++) { img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = 255; img.data[i * 4 + 3] = Math.round(m[i] * 255); }
+  ctx.putImageData(img, 0, 0); cloudShadowTex.needsUpdate = true;
+  const geo = buildCloudGeometry();
+  if (cloudTiles.length) cloudTiles[0].geometry.dispose();
+  while (cloudTiles.length) cloudGroup.remove(cloudTiles.pop());
+  for (let k = 0; k < 9; k++) { const m = new THREE.Mesh(geo, cloudMat); m.renderOrder = 2; cloudGroup.add(m); cloudTiles.push(m); }
 }
 const DAY_SKY = new THREE.Color(0.53, 0.75, 1.0), NIGHT_SKY = new THREE.Color(0.012, 0.018, 0.05), DUSK = new THREE.Color(0.98, 0.52, 0.28), WATER_FOG = new THREE.Color(0.06, 0.16, 0.4), LAVA_FOG = new THREE.Color(0.8, 0.25, 0.02);
-const skyCol = new THREE.Color();
-let wind = 0;
-// returns daylight 0.16..1 and updates fog, sky objects and voxel uniforms
+const CLOUD_DUSK = new THREE.Color(1, 0.72, 0.55), CLOUD_NIGHT = new THREE.Color(0.11, 0.13, 0.19);
+const skyCol = new THREE.Color(), _dayCloud = new THREE.Color();
+let wind = 0, sunStrength = 0;
+// returns daylight 0.16..1 and updates fog, sky objects, clouds and voxel uniforms
 function updateEnvironment(dt, t, eye, inFluid, nightVision) {
   const ang = t * Math.PI * 2, sunH = Math.sin(ang);
-  const daylight = 0.16 + 0.84 * smooth(-0.2, 0.3, sunH);
-  skyCol.copy(NIGHT_SKY).lerp(DAY_SKY, smooth(-0.25, 0.3, sunH)).lerp(DUSK, Math.exp(-Math.pow(sunH / 0.16, 2)) * 0.45);
+  const daylight = 0.16 + 0.84 * smooth(-0.2, 0.3, sunH), dusk = Math.exp(-Math.pow(sunH / 0.16, 2));
+  skyCol.copy(NIGHT_SKY).lerp(DAY_SKY, smooth(-0.25, 0.3, sunH)).lerp(DUSK, dusk * 0.45);
   if (nightVision) skyCol.lerp(DAY_SKY, .5 * nightVision);
   const fog = scene.fog;
   if (inFluid === B.WATER) { fog.color.copy(WATER_FOG).multiplyScalar(Math.max(daylight, nightVision) + .2); fog.near = 1; fog.far = 18 + nightVision * 30; }
   else if (inFluid === B.LAVA) { fog.color.copy(LAVA_FOG); fog.near = .1; fog.far = 2.5; }
   else { fog.color.copy(skyCol); fog.near = renderDist * CS * 0.45; fog.far = renderDist * CS * 0.95; }
   renderer.setClearColor(fog.color);
-  for (const m of VOXEL_MATS) { const u = m.uniforms; u.daylight.value = daylight; u.nightVision.value = nightVision * .85; u.fogColor.value.copy(fog.color); u.fogNear.value = fog.near; u.fogFar.value = fog.far; }
-  cloudMat.color.setScalar(Math.max(daylight, .25));
+  // sun direction moves in quarter-degree steps so shadow edges don't shimmer every frame
+  const q = Math.PI / 720, sa = Math.round(ang / q) * q;
+  sunDir.set(Math.cos(sa), Math.sin(sa), 0.15).normalize();
+  sunStrength = SHADOW.on ? 0.45 * smooth(0.0, 0.2, sunH) : 0;
+  wind += dt * 1.6; cloudOffset.set(wind, 0);
+  for (const m of VOXEL_MATS) {
+    const u = m.uniforms; u.daylight.value = daylight; u.nightVision.value = nightVision * .85; u.fogColor.value.copy(fog.color); u.fogNear.value = fog.near; u.fogFar.value = fog.far;
+    u.sunStrength.value = sunStrength; u.useShadowMap.value = sunStrength > 0 ? 1 : 0;
+  }
+  // clouds: tile the cloud mesh around the player, drifting with the wind
+  cloudGroup.visible = !inFluid;
+  const tx = Math.floor((eye.x - wind) / CLOUD_TILE), tz = Math.floor(eye.z / CLOUD_TILE);
+  let k = 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) cloudTiles[k++].position.set((tx + a) * CLOUD_TILE + wind, CLOUD_Y, (tz + b) * CLOUD_TILE);
+  const cu = cloudMat.uniforms;
+  cu.cloudColor.value.copy(CLOUD_NIGHT).lerp(_dayCloud.setRGB(1, 1, 1), smooth(-0.2, 0.25, sunH)).lerp(CLOUD_DUSK, dusk * .55);
+  cu.fogColor.value.copy(skyCol); cu.fadeNear.value = 120 + renderDist * 8; cu.fadeFar.value = 360 + renderDist * 20;
   starMat.opacity = 1 - smooth(-0.3, 0.05, sunH);
   sun.position.set(eye.x + Math.cos(ang) * 400, eye.y + sunH * 400, eye.z + 60); sun.lookAt(eye);
   moon.position.set(eye.x - Math.cos(ang) * 400, eye.y - sunH * 400, eye.z - 60); moon.lookAt(eye);
   stars.position.copy(eye); stars.rotation.z = ang;
-  wind += dt * 1.6; clouds.position.set(eye.x, 124, eye.z); cloudTex.offset.set((eye.x + wind) / CLOUD_SIZE, -eye.z / CLOUD_SIZE);
   return daylight;
+}
+
+// ---------- sun shadow map, rendered from the sun around the player ----------
+const shadowCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 420);
+const depthCutout = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: tex, alphaTest: .5 });
+const depthSolid = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+const SHADOW_BIAS = new THREE.Matrix4().set(.5, 0, 0, .5, 0, .5, 0, .5, 0, 0, .5, .5, 0, 0, 0, 1);
+const _clear = new THREE.Color(), _sv = new THREE.Vector3();
+// the player has no visible body in first person, but it still casts a shadow (layer 2 only)
+const shadowBody = new THREE.Group(); scene.add(shadowBody);
+const bodyLimbs = [];
+{
+  const box = (w, h, d, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d)); m.position.set(x, y, z); m.layers.set(2); parent.add(m); return m; };
+  box(.5, .5, .5, 0, 1.56, 0, shadowBody); box(.5, .74, .26, 0, .96, 0, shadowBody);
+  for (const [x, y, w] of [[-.37, 1.32, .22], [.37, 1.32, .22], [-.13, .62, .24], [.13, .62, .24]]) {
+    const pivot = new THREE.Group(); pivot.position.set(x, y, 0); shadowBody.add(pivot);
+    box(w, y > 1 ? .7 : .62, w, 0, -(y > 1 ? .33 : .31), 0, pivot); bodyLimbs.push(pivot);
+  }
+}
+function setShadowQuality(on) {
+  SHADOW.on = on;
+  for (const m of VOXEL_MATS) { m.uniforms.shadowTexel.value = 1 / SHADOW.size; m.uniforms.shadowRange.value = SHADOW.range; }
+}
+function renderShadows(px, py, pz, yaw, hv, showBody) {
+  if (!SHADOW.on || sunStrength <= 0) return;
+  const R = SHADOW.range;
+  shadowCam.left = shadowCam.bottom = -R; shadowCam.right = shadowCam.top = R; shadowCam.updateProjectionMatrix();
+  shadowCam.position.copy(sunDir).multiplyScalar(200); shadowCam.lookAt(0, 0, 0); shadowCam.updateMatrixWorld();
+  // snap the centre to whole shadow-map texels so shadow edges don't crawl as the player walks
+  const texel = 2 * R / SHADOW.size;
+  _sv.set(px, py, pz).applyMatrix4(shadowCam.matrixWorldInverse);
+  _sv.x = Math.round(_sv.x / texel) * texel; _sv.y = Math.round(_sv.y / texel) * texel;
+  _sv.applyMatrix4(shadowCam.matrixWorld);
+  shadowCam.position.copy(_sv).addScaledVector(sunDir, 200); shadowCam.updateMatrixWorld();
+  shadowCenter.set(px, py, pz);
+  shadowBody.visible = showBody; shadowBody.position.set(px, py, pz); shadowBody.rotation.y = yaw;
+  const swingA = reduceMotion ? 0 : Math.sin(bob * 2) * Math.min(1, hv / 4) * .7;
+  bodyLimbs[0].rotation.x = bodyLimbs[3].rotation.x = swingA; bodyLimbs[1].rotation.x = bodyLimbs[2].rotation.x = -swingA;
+  renderer.getClearColor(_clear); const alpha = renderer.getClearAlpha();
+  renderer.setRenderTarget(shadowTarget); renderer.setClearColor(0xffffff, 1); renderer.clear();
+  scene.overrideMaterial = depthCutout; shadowCam.layers.set(1); renderer.render(scene, shadowCam);
+  scene.overrideMaterial = depthSolid; shadowCam.layers.set(2); renderer.render(scene, shadowCam);
+  scene.overrideMaterial = null; renderer.setRenderTarget(null); renderer.setClearColor(_clear, alpha);
+  shadowMatrix.copy(SHADOW_BIAS).multiply(shadowCam.projectionMatrix).multiply(shadowCam.matrixWorldInverse);
 }
 
 // ---------- selection & breaking overlay ----------
@@ -102,11 +240,11 @@ function showCrack(x, y, z, stage) {
 }
 
 // ---------- geometry helpers ----------
-function makeGeo(P, U, C, I, attr = 'color') {
+function makeGeo(P, U, C, I, attr = 'color', size = 3) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
-  g.setAttribute(attr, new THREE.Float32BufferAttribute(C, 3));
+  g.setAttribute(attr, new THREE.Float32BufferAttribute(C, size));
   g.setIndex(I); g.computeBoundingSphere(); return g;
 }
 // a single centered cube with face shading baked into vertex colours (hand, drops, TNT)

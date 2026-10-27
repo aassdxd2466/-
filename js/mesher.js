@@ -25,7 +25,7 @@ function buildMesh(ch) {
     const bd = BLOCKS[id], X = ox + x, Z = oz + z;
     if (bd.shape === 'cross') {
       const [s, b] = cellLight(x, y, z);
-      for (const q of PLANT_QUADS) { const base = S.P.length / 3; q.forEach((p, k) => { S.P.push(X + p[0], y + p[1], Z + p[2]); S.U.push(...tileUV(bd.tiles[0], k & 1, k >> 1)); S.L.push(.95, s, b); }); both(S, base); }
+      for (const q of PLANT_QUADS) { const base = S.P.length / 3; q.forEach((p, k) => { S.P.push(X + p[0], y + p[1], Z + p[2]); S.U.push(...tileUV(bd.tiles[0], k & 1, k >> 1)); S.L.push(.95, s, b, 0); }); both(S, base); }
       continue;
     }
     if (bd.shape === 'torch') {
@@ -37,7 +37,7 @@ function buildMesh(ch) {
         for (const c of f.c) {
           S.P.push(X + a + c[0] * w + bx + lx * c[1], y + c[1] * h + lift, Z + a + c[2] * w + bz + lz * c[1]);
           const v = f.dir[1] === 1 ? 8 / 16 + c[4] * 2 / 16 : f.dir[1] === -1 ? c[4] * 2 / 16 : c[4] * 10 / 16;
-          S.U.push(...tileUV(t, 7 / 16 + c[3] * 2 / 16, v)); S.L.push(1, s, 1);
+          S.U.push(...tileUV(t, 7 / 16 + c[3] * 2 / 16, v)); S.L.push(1, s, 1, 0);
         }
         quad(S, base, false);
       }
@@ -45,7 +45,7 @@ function buildMesh(ch) {
     }
     if (bd.shape === 'ladder') {
       const dir = FACES[md[i]].dir, ax = dir[0] ? 0 : 2, p = (dir[0] || dir[2]) > 0 ? 1 / 16 : 15 / 16, [s, b] = cellLight(x, y, z), base = S.P.length / 3;
-      for (let k = 0; k < 4; k++) { const u = k & 1, v = k >> 1; S.P.push(X + (ax === 0 ? p : u), y + v, Z + (ax === 0 ? u : p)); S.U.push(...tileUV(bd.tiles[0], u, v)); S.L.push(.9, s, b); }
+      for (let k = 0; k < 4; k++) { const u = k & 1, v = k >> 1; S.P.push(X + (ax === 0 ? p : u), y + v, Z + (ax === 0 ? u : p)); S.U.push(...tileUV(bd.tiles[0], u, v)); S.L.push(.9, s, b, 0); }
       both(S, base);
       continue;
     }
@@ -60,7 +60,7 @@ function buildMesh(ch) {
         const base = A.P.length / 3, s = sky(fx, fy, fz), b = glow ? 1 : levelLight(blk(fx, fy, fz));
         for (const c of f.c) {
           A.P.push(X + c[0], y + (c[1] ? topH(c[0], c[2]) : 0), Z + c[2]);
-          A.U.push(...tileUV(bd.tiles[0], c[3], c[4])); A.L.push(f.shade, s, b);
+          A.U.push(...tileUV(bd.tiles[0], c[3], c[4])); A.L.push(f.shade, s, b, 1);
         }
         quad(A, base, false);
       }
@@ -82,14 +82,14 @@ function buildMesh(ch) {
         if (!s1) { ss += sky(x + o1[0], y + o1[1], z + o1[2]); bl += blk(x + o1[0], y + o1[1], z + o1[2]); cnt++; }
         if (!s2) { ss += sky(x + o2[0], y + o2[1], z + o2[2]); bl += blk(x + o2[0], y + o2[1], z + o2[2]); cnt++; }
         if (!cr && !(s1 && s2)) { ss += sky(x + o3[0], y + o3[1], z + o3[2]); bl += blk(x + o3[0], y + o3[1], z + o3[2]); cnt++; }
-        A.L.push(f.shade * AO_CURVE[a], ss / cnt, levelLight(bl / cnt));
+        A.L.push(f.shade * AO_CURVE[a], ss / cnt, levelLight(bl / cnt), 1);
       }
       quad(A, base, ao[0] + ao[3] > ao[1] + ao[2]);
     }
   }
   disposeChunk(ch);
-  if (S.I.length) { ch.mesh = new THREE.Mesh(makeGeo(S.P, S.U, S.L, S.I, 'light'), chunkMat); scene.add(ch.mesh); }
-  if (W.I.length) { ch.water = new THREE.Mesh(makeGeo(W.P, W.U, W.L, W.I, 'light'), fluidMat); ch.water.renderOrder = 1; scene.add(ch.water); }
+  if (S.I.length) { ch.mesh = new THREE.Mesh(makeGeo(S.P, S.U, S.L, S.I, 'light', 4), chunkMat); ch.mesh.layers.enable(1); scene.add(ch.mesh); }
+  if (W.I.length) { ch.water = new THREE.Mesh(makeGeo(W.P, W.U, W.L, W.I, 'light', 4), fluidMat); ch.water.renderOrder = 1; scene.add(ch.water); }
   ch.dirty = false; ch.meshed = true;
 }
 function disposeChunk(ch) {

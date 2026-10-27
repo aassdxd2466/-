@@ -107,6 +107,7 @@ function frame(now) {
   renderStats(); renderVignette(dt);
   if ((uiTick -= dt) <= 0) { uiTick = .25; renderEffects(); updateTouchButtons(); }
 
+  renderShadows(player.pos.x, player.pos.y, player.pos.z, player.yaw, hv, !player.dead);
   renderer.clear();
   renderer.render(scene, camera);
   if (mode === 'play' && !player.dead) { renderer.clearDepth(); renderer.render(handScene, handCam); }

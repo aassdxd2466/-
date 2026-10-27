@@ -29,7 +29,7 @@ const drops = [];
 function spawnDrop(id, n, x, y, z, o = {}) {
   if (!id || n <= 0) return;
   const flat = isFlatItem(id), mesh = new THREE.Mesh(flat ? planeGeo : cachedBlockGeo(id), flat ? flatItemMaterial(id) : dropBlockMat);
-  mesh.scale.setScalar(flat ? .42 : .26); scene.add(mesh);
+  mesh.scale.setScalar(flat ? .42 : .26); if (!flat) mesh.layers.enable(2); scene.add(mesh);
   drops.push({ id, n, dur: o.dur || 0, pos: new THREE.Vector3(x, y, z), vel: o.vel || new THREE.Vector3((Math.random() - .5) * 2.4, 3 + Math.random() * 1.5, (Math.random() - .5) * 2.4),
     onGround: false, age: 0, delay: o.delay ?? .35, mesh, phase: Math.random() * 6 });
 }
@@ -93,7 +93,7 @@ const MOB = {
 };
 function part(m, w, h, d, color, x, y, z, parent) {
   const mat = new THREE.MeshBasicMaterial({ color, vertexColors: true }); mat.userData.base = new THREE.Color(color); m.mats.push(mat);
-  const mesh = new THREE.Mesh(shadedBox(w, h, d), mat); mesh.position.set(x, y, z); (parent || m.g).add(mesh); return mesh;
+  const mesh = new THREE.Mesh(shadedBox(w, h, d), mat); mesh.position.set(x, y, z); mesh.layers.enable(2); (parent || m.g).add(mesh); return mesh;
 }
 function limb(m, w, h, d, color, x, y, z) { const g = new THREE.Group(); g.position.set(x, y, z); part(m, w, h, d, color, 0, -h / 2, 0, g); m.g.add(g); return g; }
 function buildModel(m) {
@@ -233,7 +233,7 @@ function mobOnRay(o, d, maxT) {
 const tnts = []; let shake = 0;
 function primeTNT(x, y, z, fuse = 2.5) {
   const mat = new THREE.MeshBasicMaterial({ map: tex, vertexColors: true });
-  const m = new THREE.Mesh(cachedBlockGeo(B.TNT), mat); m.position.set(x + .5, y + .5, z + .5); scene.add(m);
+  const m = new THREE.Mesh(cachedBlockGeo(B.TNT), mat); m.position.set(x + .5, y + .5, z + .5); m.layers.enable(2); scene.add(m);
   tnts.push({ t: fuse, m, mat, vy: 2 }); tone(900, 200, .5, .05, 'sawtooth');
 }
 function updateTNT(dt, light) {
