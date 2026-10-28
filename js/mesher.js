@@ -4,8 +4,25 @@
 // ============================================================
 const AO_CURVE = [0.5, 0.7, 0.85, 1.0];
 const levelLight = l => l > 0 ? Math.pow(0.82, 15 - l) : 0;
+// texture orientation per face, from a hash: 'rot' turns in 90 degree steps and mirrors, 'flip' mirrors sideways,
+// 'flipxy' mirrors on either axis, 'none' keeps the tile as painted
+function orientUV(mode, h, u, v, out) {
+  let a = u, b = v;
+  if (mode === 'rot') { const r = (h * 8) | 0; for (let i = 0; i < (r & 3); i++) { const t = a; a = b; b = 1 - t; } if (r & 4) a = 1 - a; }
+  else if (mode === 'flip') { if (h < .5) a = 1 - a; }
+  else if (mode === 'flipxy') { const r = (h * 4) | 0; if (r & 1) a = 1 - a; if (r & 2) b = 1 - b; }
+  out[0] = a; out[1] = b; return out;
+}
+// grass and leaf colour drift across the world: drier and warmer in some places, lusher in others
+const TINT = { blockVar: 0.07, regional: 1.2, dry: [1.15, 1.05, 0.75], lush: [0.86, 1.02, 0.9] };
+const REGION_TILES = { [T.GRASS_TOP]: 1, [T.GRASS_SIDE]: .6, [T.TALLGRASS]: 1, [T.LEAVES]: .5, [T.BIRCH_LEAVES]: .5 };
+function regionTint(X, Z, k, out) {
+  const t = clamp((N.wet.noise(X / 90, Z / 90, 5.3) + .5 * N.temp.noise(X / 35, Z / 35, 8.1)) * TINT.regional, -1, 1) * k, c = t < 0 ? TINT.dry : TINT.lush, a = Math.abs(t);
+  out[0] *= 1 + (c[0] - 1) * a; out[1] *= 1 + (c[1] - 1) * a; out[2] *= 1 + (c[2] - 1) * a;
+}
 function buildMesh(ch) {
-  const S = { P: [], U: [], L: [], N: [], I: [] }, W = { P: [], U: [], L: [], N: [], I: [] };
+  // per mesh: positions, uvs, light (ao, sky, block, one-sided), normals, tint colours, and index lists per texture tile
+  const S = { P: [], U: [], L: [], N: [], C: [], I: {} }, W = { P: [], U: [], L: [], N: [], C: [], I: {} };
   const ox = ch.cx * CS, oz = ch.cz * CS, d = ch.data, md = ch.meta, lt = ch.light;
   const inside = (x, z) => x >= 0 && x < CS && z >= 0 && z < CS;
   const nb = (x, y, z) => { if (y < 0) return B.BEDROCK; if (y >= H) return B.AIR; return inside(x, z) ? d[(y * CS + z) * CS + x] : getBlock(ox + x, y, oz + z); };
@@ -13,19 +30,28 @@ function buildMesh(ch) {
   const sky = (x, y, z) => { if (y >= H) return 1; const t = inside(x, z) ? ch.top[z * CS + x] : getTop(ox + x, oz + z); return y > t ? 1 : 0; };
   const blk = (x, y, z) => (y < 0 || y >= H) ? 0 : inside(x, z) ? lt[(y * CS + z) * CS + x] : getLight(ox + x, y, oz + z);
   const occ = (x, y, z) => BLOCKS[nb(x, y, z)].occ ? 1 : 0;
-  const quad = (A, base, flip) => flip ? A.I.push(base, base + 1, base + 3, base, base + 3, base + 2) : A.I.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
-  const both = (A, b) => A.I.push(b, b + 1, b + 2, b + 2, b + 1, b + 3, b, b + 2, b + 1, b + 2, b + 3, b + 1);
+  const idx = (A, tile) => A.I[tile] || (A.I[tile] = []);
+  const quad = (A, tile, base, flip) => flip ? idx(A, tile).push(base, base + 1, base + 3, base, base + 3, base + 2) : idx(A, tile).push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+  const both = (A, tile, b) => idx(A, tile).push(b, b + 1, b + 2, b + 2, b + 1, b + 3, b, b + 2, b + 1, b + 2, b + 3, b + 1);
   const cellLight = (x, y, z) => [sky(x, y, z), levelLight(blk(x, y, z))];
   // fluid surface height of a cell, -1 when it holds a different block
   const fh = (x, y, z, id) => { if (nb(x, y, z) !== id) return -1; if (nb(x, y + 1, z) === id) return 1; const m = nbMeta(x, y, z); return (m === 0 || m >= 8) ? 0.875 : (8 - m) / 9; };
   const cornerH = (x, y, z, cx, cz, id) => { let s = 0, n = 0; for (let a = -1; a <= 0; a++) for (let b = -1; b <= 0; b++) { const h = fh(x + cx + a, y, z + cz + b, id); if (h === 1) return 1; if (h >= 0) { s += h; n++; } } return n ? s / n : 0.875; };
+  // a block's tint: small random brightness/hue change, times the regional colour for grass and leaves
+  const tint = [1, 1, 1], uv = [0, 0];
+  const setTint = (X, y, Z, tile) => {
+    const v = TINT.blockVar * (TILE_SPEC[tile].tint ?? 1), h = ihash(X * 31 + y, Z, 7019);
+    tint[0] = 1 + (h - .5) * v; tint[1] = 1 + (ihash(X, y * 17 + Z, 7027) - .5) * v * .6 + (h - .5) * v * .4; tint[2] = 1 + (ihash(Z * 13, X + y, 7039) - .5) * v * .6 + (h - .5) * v * .4;
+    const k = REGION_TILES[tile]; if (k) regionTint(X, Z, k, tint);
+  };
 
   for (let y = 0; y <= ch.maxY; y++) for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
     const i = (y * CS + z) * CS + x, id = d[i]; if (!id) continue;
     const bd = BLOCKS[id], X = ox + x, Z = oz + z;
     if (bd.shape === 'cross') {
-      const [s, b] = cellLight(x, y, z);
-      for (const q of PLANT_QUADS) { const base = S.P.length / 3; q.forEach((p, k) => { S.P.push(X + p[0], y + p[1], Z + p[2]); S.U.push(...tileUV(bd.tiles[0], k & 1, k >> 1)); S.L.push(1, s, b, 0); S.N.push(0, 1, 0); }); both(S, base); }
+      const [s, b] = cellLight(x, y, z), t = bd.tiles[0], fl = ihash(X, y, Z * 3 + 1) < .5;
+      setTint(X, y, Z, t);
+      for (const q of PLANT_QUADS) { const base = S.P.length / 3; q.forEach((p, k) => { S.P.push(X + p[0], y + p[1], Z + p[2]); S.U.push(fl ? 1 - (k & 1) : k & 1, k >> 1); S.L.push(1, s, b, 0); S.N.push(0, 1, 0); S.C.push(...tint); }); both(S, t, base); }
       continue;
     }
     if (bd.shape === 'torch') {
@@ -37,20 +63,22 @@ function buildMesh(ch) {
         for (const c of f.c) {
           S.P.push(X + a + c[0] * w + bx + lx * c[1], y + c[1] * h + lift, Z + a + c[2] * w + bz + lz * c[1]);
           const v = f.dir[1] === 1 ? 8 / 16 + c[4] * 2 / 16 : f.dir[1] === -1 ? c[4] * 2 / 16 : c[4] * 10 / 16;
-          S.U.push(...tileUV(t, 7 / 16 + c[3] * 2 / 16, v)); S.L.push(1, s, 1, 0); S.N.push(...f.dir);
+          S.U.push(7 / 16 + c[3] * 2 / 16, v); S.L.push(1, s, 1, 0); S.N.push(...f.dir); S.C.push(1, 1, 1);
         }
-        quad(S, base, false);
+        quad(S, t, base, false);
       }
       continue;
     }
     if (bd.shape === 'ladder') {
       const dir = FACES[md[i]].dir, ax = dir[0] ? 0 : 2, p = (dir[0] || dir[2]) > 0 ? 1 / 16 : 15 / 16, [s, b] = cellLight(x, y, z), base = S.P.length / 3;
-      for (let k = 0; k < 4; k++) { const u = k & 1, v = k >> 1; S.P.push(X + (ax === 0 ? p : u), y + v, Z + (ax === 0 ? u : p)); S.U.push(...tileUV(bd.tiles[0], u, v)); S.L.push(1, s, b, 0); S.N.push(...dir); }
-      both(S, base);
+      setTint(X, y, Z, bd.tiles[0]);
+      for (let k = 0; k < 4; k++) { const u = k & 1, v = k >> 1; S.P.push(X + (ax === 0 ? p : u), y + v, Z + (ax === 0 ? u : p)); S.U.push(u, v); S.L.push(1, s, b, 0); S.N.push(...dir); S.C.push(...tint); }
+      both(S, bd.tiles[0], base);
       continue;
     }
     if (bd.liquid) {
-      const A = id === B.LAVA ? S : W, glow = id === B.LAVA;
+      // fluids use world-space UVs so the surface texture runs on unbroken and can scroll as one sheet
+      const A = id === B.LAVA ? S : W, glow = id === B.LAVA, t = bd.tiles[0], wx = ((X % 64) + 64) % 64, wz = ((Z % 64) + 64) % 64;
       const ch00 = cornerH(x, y, z, 0, 0, id), ch10 = cornerH(x, y, z, 1, 0, id), ch01 = cornerH(x, y, z, 0, 1, id), ch11 = cornerH(x, y, z, 1, 1, id);
       const topH = (cx, cz) => cx ? (cz ? ch11 : ch10) : (cz ? ch01 : ch00);
       for (const f of FACES) {
@@ -59,23 +87,26 @@ function buildMesh(ch) {
         if (f.dir[1] !== 1 && !BLOCKS[n].transparent) continue;
         const base = A.P.length / 3, s = sky(fx, fy, fz), b = glow ? 1 : levelLight(blk(fx, fy, fz));
         for (const c of f.c) {
-          A.P.push(X + c[0], y + (c[1] ? topH(c[0], c[2]) : 0), Z + c[2]);
-          A.U.push(...tileUV(bd.tiles[0], c[3], c[4])); A.L.push(1, s, b, 1); A.N.push(...f.dir);
+          const py = c[1] ? topH(c[0], c[2]) : 0;
+          A.P.push(X + c[0], y + py, Z + c[2]);
+          if (f.dir[1]) A.U.push(wx + c[0], wz + c[2]); else A.U.push(f.dir[0] ? wz + c[2] : wx + c[0], y + py);
+          A.L.push(1, s, b, 1); A.N.push(...f.dir); A.C.push(1, 1, 1);
         }
-        quad(A, base, false);
+        quad(A, t, base, false);
       }
       continue;
     }
-    const A = id === B.ICE ? W : S, m = md[i];
+    const A = (id === B.ICE || id === B.GLASS) ? W : S, m = md[i];
     for (let fi = 0; fi < 6; fi++) {
       const f = FACES[fi], fx = x + f.dir[0], fy = y + f.dir[1], fz = z + f.dir[2], n = nb(fx, fy, fz), nd = BLOCKS[n];
       if (!nd.transparent) continue;
       if (n === id && bd.transparent) continue;
-      const tile = faceTile(bd, fi, m), base = A.P.length / 3, ao = [0, 0, 0, 0];
+      const tile = faceTile(bd, fi, m), base = A.P.length / 3, ao = [0, 0, 0, 0], mode = TILE_SPEC[tile].uv, h = ihash(X * 7 + fi, y * 3 + Z * 5, 9001);
+      setTint(X, y, Z, tile);
       for (let k = 0; k < 4; k++) {
         const c = f.c[k], [o1, o2, o3] = f.ao[k];
         A.P.push(X + c[0], y + c[1], Z + c[2]);
-        const uv = tileUV(tile, c[3], c[4]); A.U.push(uv[0], uv[1]);
+        orientUV(mode, h, c[3], c[4], uv); A.U.push(uv[0], uv[1]); A.C.push(...tint);
         const s1 = occ(x + o1[0], y + o1[1], z + o1[2]), s2 = occ(x + o2[0], y + o2[1], z + o2[2]), cr = occ(x + o3[0], y + o3[1], z + o3[2]);
         const a = (s1 && s2) ? 0 : 3 - (s1 + s2 + cr); ao[k] = a;
         let ss = sky(fx, fy, fz), bl = blk(fx, fy, fz), cnt = 1;
@@ -84,17 +115,40 @@ function buildMesh(ch) {
         if (!cr && !(s1 && s2)) { ss += sky(x + o3[0], y + o3[1], z + o3[2]); bl += blk(x + o3[0], y + o3[1], z + o3[2]); cnt++; }
         A.L.push(AO_CURVE[a], ss / cnt, levelLight(bl / cnt), 1); A.N.push(...f.dir);
       }
-      quad(A, base, ao[0] + ao[3] > ao[1] + ao[2]);
+      quad(A, tile, base, ao[0] + ao[3] > ao[1] + ao[2]);
     }
   }
   disposeChunk(ch);
-  if (S.I.length) { ch.mesh = new THREE.Mesh(makeGeo(S.P, S.U, S.L, S.I, 'light', 4, S.N), chunkMat); ch.mesh.castShadow = ch.mesh.receiveShadow = true; scene.add(ch.mesh); }
-  if (W.I.length) { ch.water = new THREE.Mesh(makeGeo(W.P, W.U, W.L, W.I, 'light', 4, W.N), fluidMat); ch.water.receiveShadow = true; ch.water.renderOrder = 1; scene.add(ch.water); }
+  if (S.P.length) {
+    // the visible mesh draws one group per tile material; a shadow-only twin (layer 3) shares its buffers and
+    // draws every opaque tile in a single call, keeping per-tile groups only for alpha cut-outs (leaves, plants)
+    const g = chunkGeometry(S);
+    ch.mesh = new THREE.Mesh(g, CHUNK_MATS); ch.mesh.receiveShadow = true; scene.add(ch.mesh);
+    ch.shadow = new THREE.Mesh(shadowGeometry(g), SHADOW_MATS); ch.shadow.castShadow = true; ch.shadow.layers.set(3); scene.add(ch.shadow);
+  }
+  if (W.P.length) { ch.water = new THREE.Mesh(chunkGeometry(W), CHUNK_MATS); ch.water.receiveShadow = true; ch.water.renderOrder = 1; scene.add(ch.water); }
   ch.dirty = false; ch.meshed = true;
 }
+// opaque tiles first, cut-outs after, so the shadow twin can cover all opaque faces with one range
+function chunkGeometry(A) {
+  const tiles = Object.keys(A.I).map(Number).sort((a, b) => (TILE_SPEC[a].cutout ? 1 : 0) - (TILE_SPEC[b].cutout ? 1 : 0) || a - b), I = [], groups = [];
+  for (const t of tiles) { groups.push([I.length, A.I[t].length, t]); for (const v of A.I[t]) I.push(v); }
+  const g = makeGeo(A.P, A.U, I, A.N, { light: [A.L, 4], color: [A.C, 3] });
+  for (const [s, n, t] of groups) g.addGroup(s, n, t);
+  return g;
+}
+function shadowGeometry(g) {
+  const s = new THREE.BufferGeometry();
+  for (const k of ['position', 'normal', 'uv']) s.setAttribute(k, g.attributes[k]);
+  s.setIndex(g.index); s.boundingSphere = g.boundingSphere;
+  let solidEnd = 0;
+  for (const gr of g.groups) if (!TILE_SPEC[gr.materialIndex].cutout) solidEnd = gr.start + gr.count;
+  if (solidEnd) s.addGroup(0, solidEnd, SHADOW_SOLID);
+  for (const gr of g.groups) if (TILE_SPEC[gr.materialIndex].cutout) s.addGroup(gr.start, gr.count, gr.materialIndex);
+  return s;
+}
 function disposeChunk(ch) {
-  if (ch.mesh) { scene.remove(ch.mesh); ch.mesh.geometry.dispose(); ch.mesh = null; }
-  if (ch.water) { scene.remove(ch.water); ch.water.geometry.dispose(); ch.water = null; }
+  for (const k of ['mesh', 'shadow', 'water']) if (ch[k]) { scene.remove(ch[k]); ch[k].geometry.dispose(); ch[k] = null; }
 }
 
 let renderDist = isTouch ? 4 : 6;

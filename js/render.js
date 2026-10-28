@@ -34,9 +34,6 @@ renderer.shadowMap.type = THREE.PCFShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, 2000);
 camera.rotation.order = 'YXZ';
-const tex = new THREE.CanvasTexture(atlas);
-tex.colorSpace = THREE.SRGBColorSpace;
-tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.generateMipmaps = false;
 // block light level -> brightness (each step dims by ~18%)
 const LIGHT_CURVE = Array.from({ length: 16 }, (_, l) => l ? Math.pow(0.82, 15 - l) : 0);
 const col = h => new THREE.Color(h);
@@ -105,8 +102,38 @@ function patchVoxel(mat, perVertex, voxUniform, spec = LIGHTING.terrainSpecular)
 // light at an entity's cell, as (ao, sky access, block light, 1)
 function cellVox(x, y, z, v) { x = Math.floor(x); y = Math.floor(y); z = Math.floor(z); return v.set(1, y >= H ? 1 : skyAt(x, y, z), levelLight(getLight(x, y, z)), 1); }
 
-const chunkMat = patchVoxel(new THREE.MeshStandardMaterial({ map: tex, alphaTest: .5, roughness: .9, metalness: 0 }), true);
-const fluidMat = patchVoxel(new THREE.MeshStandardMaterial({ map: tex, transparent: true, opacity: .8, roughness: .12, metalness: 0, side: THREE.DoubleSide, depthWrite: false }), true, null, 1);
+// ---------- block materials: one PBR material per texture tile (no atlas, so mipmaps never bleed between tiles) ----------
+// The maps come from blocktex.js: albedo (sRGB), tangent-space normal (Sobel of the height field) and ORM
+// (R cavity occlusion, G roughness, B metal mask). Roughness and metalness per tile are in TILE_SPEC there.
+const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+function tileTexture(data, srgb) {
+  const t = new THREE.DataTexture(data, TEX, TEX);
+  t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true; t.anisotropy = MAX_ANISO;
+  t.needsUpdate = true; return t;
+}
+const TILE_TEX = TILE_MAPS.map(m => ({ map: tileTexture(m.albedo, true), normal: tileTexture(m.normal, false), orm: tileTexture(m.orm, false), emissive: m.emissive && tileTexture(m.emissive, true) }));
+function tileMaterial(tile, perVertex, vox) {
+  const s = TILE_SPEC[tile], t = TILE_TEX[tile];
+  const m = new THREE.MeshStandardMaterial({ map: t.map, roughnessMap: t.orm, aoMap: t.orm, roughness: Math.min(1, s.rough * TILE_MAPS[tile].rk), metalness: 0, vertexColors: perVertex });
+  if (!s.plant) m.normalMap = t.normal; // crossed plant quads use an upward normal, so a tangent-space map would only add noise
+  if (s.metal) { m.metalnessMap = t.orm; m.metalness = s.metal; }
+  if (t.emissive) { m.emissiveMap = t.emissive; m.emissive.setRGB(1, 1, 1); m.emissiveIntensity = s.emissive; }
+  if (s.cutout) { m.alphaTest = .5; m.alphaToCoverage = true; } // with MSAA the cut-out edges are smoothed instead of stair-stepped
+  if (s.transparent) { m.transparent = true; m.depthWrite = false; }
+  return patchVoxel(m, perVertex, vox, s.spec ?? LIGHTING.terrainSpecular);
+}
+const CHUNK_MATS = TILE_NAMES.map((n, t) => tileMaterial(t, true));
+CHUNK_MATS[T.WATER].side = THREE.DoubleSide; // the surface is also seen from below while swimming
+// the chunk shadow twins draw all opaque faces with this one material (index SHADOW_SOLID), cut-outs with their tile material
+const SHADOW_SOLID = TILE_NAMES.length, SHADOW_MATS = [...CHUNK_MATS, new THREE.MeshBasicMaterial()];
+// water and lava drift: their textures scroll in world space
+function scrollFluids(t) {
+  const w = TILE_TEX[T.WATER], l = TILE_TEX[T.LAVA];
+  w.map.offset.set(t * .011, t * .007); w.normal.offset.set(-t * .023, t * .017); w.orm.offset.copy(w.map.offset);
+  l.map.offset.set(t * .006, -t * .004); l.normal.offset.copy(l.map.offset); l.orm.offset.copy(l.map.offset); l.emissive.offset.copy(l.map.offset);
+}
 
 // ---------- sky (Preetham atmosphere from three/addons) ----------
 const SKY_BRIGHTNESS = { value: LIGHTING.skyBrightness };
@@ -186,7 +213,7 @@ sunLight.castShadow = true;
   Object.assign(s.camera, { left: -R, right: R, top: R, bottom: -R, near: 1, far: 520 });
   s.camera.updateProjectionMatrix();
   s.bias = LIGHTING.shadowBias; s.normalBias = LIGHTING.shadowNormalBias; s.radius = LIGHTING.shadowRadius;
-  s.camera.layers.enable(2); // the invisible player body casts a shadow from layer 2
+  s.camera.layers.enable(2); s.camera.layers.enable(3); // layer 2: the invisible player body, layer 3: chunk shadow twins
 }
 scene.add(sunLight, sunLight.target);
 const hemiLight = new THREE.HemisphereLight(LIGHTING.hemiSky, LIGHTING.hemiGround, LIGHTING.hemi); scene.add(hemiLight);
@@ -342,32 +369,42 @@ function showCrack(x, y, z, stage) {
 }
 
 // ---------- geometry helpers ----------
-function makeGeo(P, U, C, I, attr = 'color', size = 3, Nm = null) {
+function makeGeo(P, U, I, Nm, extra = {}) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
-  g.setAttribute(attr, new THREE.Float32BufferAttribute(C, size));
-  if (Nm) g.setAttribute('normal', new THREE.Float32BufferAttribute(Nm, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(Nm, 3));
+  for (const k in extra) g.setAttribute(k, new THREE.Float32BufferAttribute(extra[k][0], extra[k][1]));
   g.setIndex(I); g.computeBoundingSphere(); return g;
 }
-// a single centered cube (hand, drops, TNT)
+// a single centered cube (hand, drops, TNT): one group per face, drawn with that face's tile material
 function blockGeometry(id) {
-  const bd = BLOCKS[id], P = [], U = [], Cc = [], Nm = [], Ix = [];
-  FACES.forEach((f, fi) => {
-    const tile = faceTile(bd, fi, 5), b = P.length / 3;
-    for (const c of f.c) { P.push(c[0] - .5, c[1] - .5, c[2] - .5); U.push(...tileUV(tile, c[3], c[4])); Cc.push(1, 1, 1); Nm.push(...f.dir); }
-    Ix.push(b, b + 1, b + 2, b + 2, b + 1, b + 3);
-  });
-  return makeGeo(P, U, Cc, Ix, 'color', 3, Nm);
+  const P = [], U = [], Nm = [], Ix = [];
+  FACES.forEach(f => { const b = P.length / 3; for (const c of f.c) { P.push(c[0] - .5, c[1] - .5, c[2] - .5); U.push(c[3], c[4]); Nm.push(...f.dir); } Ix.push(b, b + 1, b + 2, b + 2, b + 1, b + 3); });
+  const g = makeGeo(P, U, Ix, Nm);
+  FACES.forEach((f, fi) => g.addGroup(fi * 6, 6, fi));
+  return g;
 }
+// the six face materials of a block, lit by one shared light uniform (hand or drops); `fresh` skips the cache (TNT flashes on its own)
+const blockMatCache = {};
+function blockFaceMaterials(id, vox, fresh) {
+  const key = id + (vox === handVox ? 'h' : 'd');
+  if (!fresh && blockMatCache[key]) return blockMatCache[key];
+  const byTile = {}, list = FACES.map((f, fi) => { const t = faceTile(BLOCKS[id], fi, 5); return byTile[t] || (byTile[t] = tileMaterial(t, false, vox)); });
+  return fresh ? list : blockMatCache[key] = list;
+}
+const disposeMats = list => new Set(list).forEach(m => m.dispose());
 const shadedBox = (w, h, d) => new THREE.BoxGeometry(w, h, d);
 const itemTexCache = {}, flatMatCache = {};
 function itemTexture(id) { if (!itemTexCache[id]) { const t = new THREE.CanvasTexture(ITEM16[id]); t.colorSpace = THREE.SRGBColorSpace; t.magFilter = t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; itemTexCache[id] = t; } return itemTexCache[id]; }
-const dropVox = { value: new THREE.Vector4(1, 1, 0, 1) };
-const flatMat = id => patchVoxel(new THREE.MeshStandardMaterial({ map: itemTexture(id), alphaTest: .5, side: THREE.DoubleSide, roughness: .8 }), false, dropVox);
-function flatItemMaterial(id) { return flatMatCache[id] || (flatMatCache[id] = flatMat(id)); }
+const dropVox = { value: new THREE.Vector4(1, 1, 0, 1) }, handVox = { value: new THREE.Vector4(1, 1, 0, 1) };
+// flat sprites: pixel-art items, or a plant / torch / ladder block shown with its own PBR tile
+function flatMat(id, vox) {
+  const m = isPlaceable(id) ? tileMaterial(BLOCKS[id].tiles[0], false, vox) : patchVoxel(new THREE.MeshStandardMaterial({ map: itemTexture(id), alphaTest: .5, roughness: .8 }), false, vox);
+  m.side = THREE.DoubleSide; return m;
+}
+function flatItemMaterial(id) { return flatMatCache[id] || (flatMatCache[id] = flatMat(id, dropVox)); }
 const planeGeo = new THREE.PlaneGeometry(1, 1);
-const dropBlockMat = patchVoxel(new THREE.MeshStandardMaterial({ map: tex, roughness: .85 }), false, dropVox);
 const blockGeoCache = {};
 const cachedBlockGeo = id => blockGeoCache[id] || (blockGeoCache[id] = blockGeometry(id));
 
@@ -405,11 +442,9 @@ function updateParticles(dt, light) {
 // ---------- held item (drawn in its own scene over the world, lit like the player's cell) ----------
 const handScene = new THREE.Scene(), handCam = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 10);
 const handSun = new THREE.DirectionalLight(), handHemi = new THREE.HemisphereLight(); handScene.add(handSun, handSun.target, handHemi);
-const handVox = { value: new THREE.Vector4(1, 1, 0, 1) };
-const handBlockMat = patchVoxel(new THREE.MeshStandardMaterial({ map: tex, roughness: .85 }), false, handVox);
 const armMat = patchVoxel(new THREE.MeshStandardMaterial({ color: 0xc69476, roughness: .7 }), false, handVox);
 const handFlatCache = {};
-const handFlat = id => handFlatCache[id] || (handFlatCache[id] = patchVoxel(new THREE.MeshStandardMaterial({ map: itemTexture(id), alphaTest: .5, side: THREE.DoubleSide, roughness: .8 }), false, handVox));
+const handFlat = id => handFlatCache[id] || (handFlatCache[id] = flatMat(id, handVox));
 const handHolder = new THREE.Group(); handScene.add(handHolder);
 let handMesh = null, handKind = '', handId = -1, swing = 0, bob = 0, equip = 0, useAnim = 0;
 function setHand(id) {
@@ -419,7 +454,7 @@ function setHand(id) {
   if (handMesh) handHolder.remove(handMesh);
   if (!id) { handMesh = new THREE.Mesh(shadedBox(.28, .28, 1.0), armMat); handKind = 'arm'; }
   else if (isFlatItem(id)) { handMesh = new THREE.Mesh(planeGeo, handFlat(id)); handKind = 'flat'; }
-  else { handMesh = new THREE.Mesh(cachedBlockGeo(id), handBlockMat); handKind = 'block'; }
+  else { handMesh = new THREE.Mesh(cachedBlockGeo(id), blockFaceMaterials(id, handVox)); handKind = 'block'; }
   handHolder.add(handMesh);
 }
 function updateHand(dt, hv, onGround, eye, using) {

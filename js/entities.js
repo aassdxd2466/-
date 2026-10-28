@@ -28,7 +28,7 @@ function fizz(x, y, z) { noise(.5, 2600, .5, .22, 'highpass'); spawnParticles(x 
 const drops = [];
 function spawnDrop(id, n, x, y, z, o = {}) {
   if (!id || n <= 0) return;
-  const flat = isFlatItem(id), mesh = new THREE.Mesh(flat ? planeGeo : cachedBlockGeo(id), flat ? flatItemMaterial(id) : dropBlockMat);
+  const flat = isFlatItem(id), mesh = new THREE.Mesh(flat ? planeGeo : cachedBlockGeo(id), flat ? flatItemMaterial(id) : blockFaceMaterials(id, dropVox));
   mesh.scale.setScalar(flat ? .42 : .26); mesh.castShadow = true; scene.add(mesh);
   drops.push({ id, n, dur: o.dur || 0, pos: new THREE.Vector3(x, y, z), vel: o.vel || new THREE.Vector3((Math.random() - .5) * 2.4, 3 + Math.random() * 1.5, (Math.random() - .5) * 2.4),
     onGround: false, age: 0, delay: o.delay ?? .35, mesh, phase: Math.random() * 6 });
@@ -231,18 +231,18 @@ function mobOnRay(o, d, maxT) {
 // ---------- TNT ----------
 const tnts = []; let shake = 0;
 function primeTNT(x, y, z, fuse = 2.5) {
-  const mat = patchVoxel(new THREE.MeshStandardMaterial({ map: tex, roughness: .8 }), false, dropVox);
-  const m = new THREE.Mesh(cachedBlockGeo(B.TNT), mat); m.position.set(x + .5, y + .5, z + .5); m.castShadow = true; scene.add(m);
-  tnts.push({ t: fuse, m, mat, vy: 2 }); tone(900, 200, .5, .05, 'sawtooth');
+  const mats = blockFaceMaterials(B.TNT, dropVox, true); // its own materials, so only this block flashes
+  const m = new THREE.Mesh(cachedBlockGeo(B.TNT), mats); m.position.set(x + .5, y + .5, z + .5); m.castShadow = true; scene.add(m);
+  tnts.push({ t: fuse, m, mats, vy: 2 }); tone(900, 200, .5, .05, 'sawtooth');
 }
 function updateTNT(dt, light) {
   for (let i = tnts.length - 1; i >= 0; i--) {
     const t = tnts[i]; t.t -= dt;
     t.vy -= 20 * dt; const ny = t.m.position.y + t.vy * dt;
     if (BLOCKS[getBlock(Math.floor(t.m.position.x), Math.floor(ny - .5), Math.floor(t.m.position.z))].solid) { t.vy = 0; t.m.position.y = Math.floor(ny - .5) + 1.5; } else t.m.position.y = ny;
-    t.mat.emissive.setScalar(Math.floor(t.t * 6) % 2 === 0 ? 1.4 : 0);
+    for (const mt of t.mats) mt.emissive.setScalar(Math.floor(t.t * 6) % 2 === 0 ? 1.4 : 0);
     t.m.scale.setScalar(1 + Math.max(0, .4 - t.t) * .5);
-    if (t.t <= 0) { tnts.splice(i, 1); scene.remove(t.m); t.mat.dispose(); explode(t.m.position.x, t.m.position.y, t.m.position.z, 3.6); }
+    if (t.t <= 0) { tnts.splice(i, 1); scene.remove(t.m); disposeMats(t.mats); explode(t.m.position.x, t.m.position.y, t.m.position.z, 3.6); }
   }
 }
 function explode(cx, cy, cz, R) {

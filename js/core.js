@@ -37,8 +37,7 @@ function fbm(n, x, z, oct) { let s = 0, a = 1, f = 1, t = 0; for (let i = 0; i <
 let SEED = 0;
 function hash3(x, y, z) { let h = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 1274126177) + Math.imul(SEED, 144665) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
 
-// ---------- texture tiles (atlas is 16 x 8 tiles of 16px) ----------
-const ATLAS_COLS = 16, ATLAS_ROWS = 8;
+// ---------- texture tiles (each one is its own 128px PBR texture set, see blocktex.js) ----------
 const TILE_NAMES = ['GRASS_TOP', 'GRASS_SIDE', 'DIRT', 'STONE', 'SAND', 'WATER', 'LOG_SIDE', 'LOG_TOP', 'LEAVES', 'PLANKS', 'COBBLE', 'GLASS', 'BRICK', 'SNOW', 'SNOW_SIDE', 'BEDROCK',
   'GRAVEL', 'COAL', 'IRON', 'GOLD', 'DIAMOND', 'WOOL', 'BOOK', 'TNT_SIDE', 'TNT_TOP', 'TNT_BOT', 'CACTUS_SIDE', 'CACTUS_TOP', 'TALLGRASS', 'ROSE', 'DANDELION', 'LAVA',
   'OBSIDIAN', 'TORCH', 'GLOWSTONE', 'TABLE_TOP', 'TABLE_SIDE', 'TABLE_FRONT', 'FURNACE_FRONT', 'FURNACE_SIDE', 'FURNACE_TOP', 'CHEST_FRONT', 'CHEST_SIDE', 'CHEST_TOP', 'STONEBRICK', 'MOSSY', 'SANDSTONE_SIDE', 'SANDSTONE_TOP',
@@ -253,6 +252,4 @@ function faceTile(bd, fi, meta) {
   if (f.dir[1] === -1) return bd.tiles[2];
   return bd.face && fi === (meta & 7) ? bd.tiles[3] : bd.tiles[1];
 }
-const UV_EPS = 0.002;
-function tileUV(tile, u, v) { const tc = tile % ATLAS_COLS, tr = (tile / ATLAS_COLS) | 0; return [(tc + UV_EPS + u * (1 - 2 * UV_EPS)) / ATLAS_COLS, 1 - (tr + 1 - UV_EPS - v * (1 - 2 * UV_EPS)) / ATLAS_ROWS]; }
 const PLANT_QUADS = [[[.15, 0, .15], [.85, 0, .85], [.15, 1, .15], [.85, 1, .85]], [[.85, 0, .15], [.15, 0, .85], [.85, 1, .15], [.15, 1, .85]]];

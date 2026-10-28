@@ -21,7 +21,7 @@ function initWorld(seed, data) {
   for (const ch of chunks.values()) disposeChunk(ch);
   chunks.clear(); edits = new Map(); containers = new Map(); saplings = new Map(); fluidDue.clear(); touched.clear();
   for (const m of [...mobs]) removeMob(m); while (drops.length) removeDrop(0);
-  for (const t of tnts) { scene.remove(t.m); t.mat.dispose(); } tnts.length = 0; particles.length = 0;
+  for (const t of tnts) { scene.remove(t.m); disposeMats(t.mats); } tnts.length = 0; particles.length = 0;
   initNoise(seed); paintClouds(seed);
   effects = {}; mining = null; using = null; cursor = null; player.vel.set(0, 0, 0); player.flying = false; player.dead = false; player.fallStart = null;
   inv = new Array(36).fill(null); sel = 0; furnaceFuel = 0;
@@ -60,7 +60,7 @@ function frame(now) {
   updateChunks(now, player.pos.x, player.pos.z);
   const pch = chunks.get(ck(Math.floor(player.pos.x) >> 4, Math.floor(player.pos.z) >> 4)), ready = !!(pch && pch.meshed);
   if (ready && player.spawnPending) { placeAtSurface(); player.spawnPending = false; }
-  if (animateFluids(now / 1000)) tex.needsUpdate = true;
+  scrollFluids(now / 1000);
   const paused = mode === 'menu', playing = mode === 'play' && ready && !player.dead;
 
   if (!paused) {
