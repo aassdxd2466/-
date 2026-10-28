@@ -13,7 +13,22 @@ const LIGHTING = {
   envIntensity: 0.4, envInterval: 5,               // sky environment map strength and refresh period (s)
   skyBrightness: 0.22,                             // sky radiance scale so a sunlit white wall is brighter than blue sky, as outdoors
   terrainSpecular: 0.35,                           // sheen on rough blocks (water keeps full reflections)
-  hazeStart: 0.55, hazeEnd: 0.97,                  // distance haze, as fractions of the view distance
+  fogEdge: 0.5,                                    // FogExp2 amount at the render-distance edge (the density is derived from it)
+  fogFadeStart: 0.8,                               // from this fraction of the render distance the terrain melts fully into the sky
+  water: {
+    color: '#2a6f8f', opacity: 0.75, roughness: 0.04,
+    frontAlpha: 0.6,                               // opacity looking straight down = opacity x frontAlpha; it rises to 1 at grazing angles
+    reflect: 1.0,                                  // sky reflection strength (environment map)
+    absorb: [0.5, 0.17, 0.1],                      // light lost per block of water above a surface (red goes first), down and back up
+    waveA: [0.35, 0.021, 0.013], waveB: [0.9, -0.017, 0.029], waveBAngle: 0.9, // per normal map: uv scale, scroll x, scroll y
+  },
+  underwater: { color: [0.012, 0.05, 0.14], density: 0.07, far: 48, wobble: 0.004 },
+  wind: { amp: 0.04, speed: 1.7, wave: 0.35, dir: [0.8, 0.6] }, // grass and leaf sway: amplitude (blocks), phase speed, wave number
+  clouds: {
+    y: [120, 126], scale: [1 / 640, 1 / 980], speed: [[1.4, 0.3], [2.4, -0.6]], // two noise planes: height, texture scale, drift (blocks/s)
+    cover: [0.5, 0.56], soft: [0.22, 0.3], alpha: [0.95, 0.65], fade: 900,   // coverage threshold, edge softness, opacity, fade-out distance
+    sunset: '#ff9a62', dusk: '#e58aa6',            // evening tint of the lit side and of the shaded underside
+  },
   shadowSize: isTouch ? 2048 : 4096, shadowRange: 60, shadowBias: -0.0005, shadowNormalBias: 0.02, shadowRadius: 3,
   sky: { turbidity: 8, rayleigh: 2.5, mieCoefficient: 0.005, mieDirectionalG: 0.8 },
   torch: [1.0, 0.62, 0.32], torchIntensity: 1.7,   // block light (torches, lava, glowstone) colour and strength
@@ -33,19 +48,35 @@ renderer.shadowMap.enabled = true;
 // r18x removed PCFSoftShadowMap; PCFShadowMap with shadow.radius is the soft-shadow path now
 renderer.shadowMap.type = THREE.PCFShadowMap;
 const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.01); // density and colour are set every frame in updateEnvironment
 const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, 2000);
 camera.rotation.order = 'YXZ';
 // block light level -> brightness (each step dims by ~18%)
 const LIGHT_CURVE = Array.from({ length: 16 }, (_, l) => l ? Math.pow(0.82, 15 - l) : 0);
 const col = h => new THREE.Color(h);
 
-// ---------- cloud layer data (also used for cloud shadows on the ground) ----------
-const CLOUD_Y = 128, CLOUD_CELL = 12, CLOUD_THICK = 4, CLOUD_N = 64, CLOUD_TILE = CLOUD_N * CLOUD_CELL;
-const CLOUD_SHADOW_RES = 256;
-const cloudCanvas = document.createElement('canvas'); cloudCanvas.width = cloudCanvas.height = CLOUD_SHADOW_RES;
-const cloudShadowTex = new THREE.CanvasTexture(cloudCanvas);
-cloudShadowTex.wrapS = cloudShadowTex.wrapT = THREE.RepeatWrapping; cloudShadowTex.flipY = false;
-cloudShadowTex.magFilter = cloudShadowTex.minFilter = THREE.LinearFilter; cloudShadowTex.generateMipmaps = false;
+// ---------- cloud layers: two tileable noise textures, shared by the cloud planes and the cloud shadows ----------
+function cloudNoise(seed, base) {
+  const N = 256, n = tileNoise(seed), d = new Uint8Array(N * N * 4);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const u = (i + .5) / N, v = (j + .5) / N, k = (j * N + i) * 4;
+    d[k] = clamp(.5 + tfbm(n, u, v, base, 5) * 1.1 + (tridged(n, u + .37, v + .11, base * 2, 3) - .5) * .25, 0, 1) * 255; d[k + 3] = 255;
+  }
+  const t = new THREE.DataTexture(d, N, N);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true; t.needsUpdate = true;
+  return t;
+}
+const CLOUD_U = {
+  cloudMapA: { value: cloudNoise(41, 3) }, cloudMapB: { value: cloudNoise(57, 4) },
+  cloudY: { value: new THREE.Vector2(...LIGHTING.clouds.y) }, cloudScale: { value: new THREE.Vector2(...LIGHTING.clouds.scale) },
+  cloudOffA: { value: new THREE.Vector2() }, cloudOffB: { value: new THREE.Vector2() },
+  cloudCover: { value: new THREE.Vector4(LIGHTING.clouds.cover[0], LIGHTING.clouds.soft[0], LIGHTING.clouds.cover[1], LIGHTING.clouds.soft[1]) },
+  cloudAlpha: { value: new THREE.Vector2(...LIGHTING.clouds.alpha) },
+};
+const CLOUD_PARS = `uniform sampler2D cloudMapA, cloudMapB; uniform vec2 cloudY, cloudScale, cloudOffA, cloudOffB, cloudAlpha; uniform vec4 cloudCover;
+float cloudA(vec2 xz, float bias) { return smoothstep(cloudCover.x, cloudCover.x + cloudCover.y, texture2D(cloudMapA, (xz + cloudOffA) * cloudScale.x, bias).r) * cloudAlpha.x; }
+float cloudB(vec2 xz, float bias) { return smoothstep(cloudCover.z, cloudCover.z + cloudCover.w, texture2D(cloudMapB, (xz + cloudOffB) * cloudScale.y, bias).r) * cloudAlpha.y; }
+`;
 
 // ---------- voxel lighting patch for standard materials ----------
 // Adds to three's PBR lighting: the sky light level on indirect light (dark under roofs and in caves),
@@ -53,56 +84,103 @@ cloudShadowTex.magFilter = cloudShadowTex.minFilter = THREE.LinearFilter; cloudS
 // colour of the environment map in that direction. Per-vertex data comes from the mesher's
 // `light` attribute (ao, sky light, block light); entities pass the same as a uniform. Vertex AO
 // itself is already in the vertex colour (albedo); here it only occludes reflections.
-const VOX = {
+const VOX = Object.assign({
   torchColor: { value: new THREE.Color().setRGB(...LIGHTING.torch).multiplyScalar(LIGHTING.torchIntensity) },
-  caveAmbient: { value: LIGHTING.caveAmbient },
-  cloudMap: { value: cloudShadowTex }, lightDirW: { value: new THREE.Vector3(0, 1, 0) }, cloudShadow: { value: LIGHTING.cloudShadow },
-  cloudY: { value: CLOUD_Y }, cloudScale: { value: 1 / CLOUD_TILE }, cloudOffset: { value: new THREE.Vector2() },
-  hazeNear: { value: 50 }, hazeFar: { value: 100 }, hazeOverride: { value: 0 }, hazeColor: { value: new THREE.Color() },
-};
+  caveAmbient: { value: LIGHTING.caveAmbient }, lightDirW: { value: new THREE.Vector3(0, 1, 0) }, cloudShadow: { value: LIGHTING.cloudShadow },
+  fogFadeNear: { value: 50 }, fogFadeFar: { value: 100 }, hazeOverride: { value: 0 }, hazeColor: { value: new THREE.Color() },
+  windTime: { value: 0 }, windDir: { value: new THREE.Vector2(...LIGHTING.wind.dir).normalize() }, windAmp: { value: LIGHTING.wind.amp }, windWave: { value: LIGHTING.wind.wave },
+  waterTime: { value: 0 }, waterWaveA: { value: new THREE.Vector3(...LIGHTING.water.waveA) }, waterWaveB: { value: new THREE.Vector3(...LIGHTING.water.waveB) },
+  waterRotB: { value: new THREE.Vector2(Math.cos(LIGHTING.water.waveBAngle), Math.sin(LIGHTING.water.waveBAngle)) }, waterFront: { value: LIGHTING.water.frontAlpha },
+  waterAbsorb: { value: new THREE.Vector3(...LIGHTING.water.absorb) },
+}, CLOUD_U);
 const VOX_PARS = `varying vec3 vWPos;
-uniform vec3 torchColor, lightDirW, hazeColor; uniform float caveAmbient, cloudShadow, cloudY, cloudScale, hazeNear, hazeFar, hazeOverride;
-uniform vec2 cloudOffset; uniform sampler2D cloudMap;
-`;
+uniform vec3 torchColor, lightDirW, hazeColor, waterAbsorb; uniform float caveAmbient, cloudShadow, fogFadeNear, fogFadeFar, hazeOverride;
+${CLOUD_PARS}`;
 const VOX_LIGHT = `{
   vec4 vox = VOX;
-  vec2 cp = vWPos.xz + lightDirW.xz * ((cloudY - vWPos.y) / max(lightDirW.y, 0.2));
-  float direct = 1.0 - texture2D(cloudMap, (cp - cloudOffset) * cloudScale).a * cloudShadow;
+  // cloud shadows: each layer's coverage where the sun ray through this point crosses it (blurred mip)
+  float ly = max(lightDirW.y, 0.2);
+  float ca = cloudA(vWPos.xz + lightDirW.xz * ((cloudY.x - vWPos.y) / ly), 2.5), cb = cloudB(vWPos.xz + lightDirW.xz * ((cloudY.y - vWPos.y) / ly), 2.5);
+  float direct = 1.0 - clamp(ca + cb * (1.0 - ca), 0.0, 1.0) * cloudShadow;
   reflectedLight.directDiffuse *= direct;
   reflectedLight.directSpecular *= direct * VOX_SPEC;
   reflectedLight.indirectDiffuse *= vox.g;
   reflectedLight.indirectSpecular *= vox.r * vox.g * VOX_SPEC;
   reflectedLight.indirectDiffuse += material.diffuseColor * (vec3(caveAmbient) + torchColor * vox.b);
+  vec3 waterT = exp(-waterAbsorb * vox.a); // under vox.a blocks of water
+  reflectedLight.directDiffuse *= waterT; reflectedLight.directSpecular *= waterT; reflectedLight.indirectDiffuse *= waterT; reflectedLight.indirectSpecular *= waterT;
 }`;
-const VOX_HAZE = `{
-  vec3 toFrag = vWPos - cameraPosition;
-  vec3 hc = hazeColor;
+// FogExp2 (density from three's scene.fog), applied before tone mapping. Its colour is the sky itself: the environment
+// map looked up toward the horizon in this view direction, so distant terrain melts into whatever sky is behind it.
+// Near the render-distance edge the terrain fades out completely, so chunks never end in a hard line.
+const VOX_FOG = `#ifdef USE_FOG
+{
+  vec3 toFrag = vWPos - cameraPosition; float dist = length(toFrag);
+  vec3 fc = hazeColor;
   #ifdef ENVMAP_TYPE_CUBE_UV
-    if (hazeOverride < 0.5) { vec3 d = normalize(toFrag); d.y = max(d.y, 0.03); hc = textureCubeUV(envMap, envMapRotation * normalize(d), 0.0).rgb; }
+    if (hazeOverride < 0.5) { vec3 d = toFrag / dist; d.y = max(d.y, 0.03); fc = textureCubeUV(envMap, envMapRotation * normalize(d), 0.0).rgb; }
   #endif
-  float hf = smoothstep(hazeNear, hazeFar, length(toFrag));
-  gl_FragColor.rgb = mix(gl_FragColor.rgb, hc, hf * hf);
+  float ff = 0.0;
+  #ifdef FOG_EXP2
+    float fd = fogDensity * dist; ff = 1.0 - exp(-fd * fd);
+  #endif
+  ff = max(ff, smoothstep(fogFadeNear, fogFadeFar, dist));
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, fc, ff);
+}
+#endif`;
+// wind: a travelling wave across world space; 'tip' moves only the top of crossed plant quads (uv.y = 1), 'all' whole leaf blocks
+const WIND_VERTEX = `{
+  vec3 wp = (modelMatrix * vec4(transformed, 1.0)).xyz;
+  float ph = dot(wp.xz, windDir) * windWave - windTime;
+  float sw = (sin(ph) * 0.75 + sin(ph * 2.31 + wp.y * 1.7) * 0.25) * windAmp * VOX_WIND_W;
+  transformed.xz += windDir * sw;
+  transformed.y += sin(ph * 1.37 + wp.x * 0.9) * windAmp * 0.35 * VOX_WIND_W;
 }`;
-function patchVoxel(mat, perVertex, voxUniform, spec = LIGHTING.terrainSpecular) {
-  mat.fog = false;
-  const vu = voxUniform || { value: new THREE.Vector4(1, 1, 0, 1) };
+// water: two normal maps drifting in different directions and scales, blended; Fresnel trades the water colour for
+// sky reflection and makes the surface clear when looked at straight on, mirror-like at grazing angles
+const WATER_NORMAL = `{
+  vec2 ua = vWaterUv * waterWaveA.x + waterTime * waterWaveA.yz;
+  mat2 rb = mat2(waterRotB.x, waterRotB.y, -waterRotB.y, waterRotB.x);
+  vec2 ub = rb * vWaterUv * waterWaveB.x + waterTime * waterWaveB.yz;
+  vec3 na = texture2D(normalMap, ua).xyz * 2.0 - 1.0, nb = texture2D(waterNormalB, ub).xyz * 2.0 - 1.0;
+  nb.xy = transpose(rb) * nb.xy; // back into the first map's tangent frame
+  vec3 mapN = normalize(vec3(na.xy + nb.xy, na.z * nb.z));
+  mapN.xy *= normalScale;
+  normal = normalize(tbn * mapN);
+}`;
+function patchVoxel(mat, perVertex, voxUniform, spec = LIGHTING.terrainSpecular, opts = {}) {
+  mat.fog = true;
+  const vu = voxUniform || { value: new THREE.Vector4(1, 1, 0, 0) };
   mat.userData.vox = vu;
+  const wind = opts.wind === 'tip' ? 'uv.y' : opts.wind === 'all' ? '1.0' : null, water = !!opts.water;
   mat.onBeforeCompile = sh => {
     Object.assign(sh.uniforms, VOX);
     if (!perVertex) sh.uniforms.voxLight = vu;
+    if (water) sh.uniforms.waterNormalB = { value: WATER_NORMAL_B };
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vWPos;${perVertex ? '\nattribute vec4 light;\nvarying vec4 vVox;' : ''}`)
+      .replace('#include <common>', `#include <common>\nvarying vec3 vWPos;${perVertex ? '\nattribute vec4 light;\nvarying vec4 vVox;' : ''}` +
+        (wind ? `\nuniform float windTime, windAmp, windWave; uniform vec2 windDir;\n#define VOX_WIND_W ${wind}` : '') + (water ? '\nvarying vec2 vWaterUv;' : ''))
+      .replace('#include <begin_vertex>', `#include <begin_vertex>${wind ? '\n' + WIND_VERTEX : ''}${water ? '\nvWaterUv = uv;' : ''}`)
       .replace('#include <project_vertex>', `#include <project_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;${perVertex ? '\nvVox = light;' : ''}`);
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>\n#define VOX_SPEC ${spec.toFixed(3)}\n${VOX_PARS}${perVertex ? 'varying vec4 vVox;\n#define VOX vVox' : 'uniform vec4 voxLight;\n#define VOX voxLight'}`)
-      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${VOX_LIGHT}`)
-      .replace('#include <tonemapping_fragment>', `${VOX_HAZE}\n#include <tonemapping_fragment>`);
+      .replace('#include <common>', `#include <common>\n#define VOX_SPEC ${spec.toFixed(3)}\n${VOX_PARS}${perVertex ? 'varying vec4 vVox;\n#define VOX vVox' : 'uniform vec4 voxLight;\n#define VOX voxLight'}` +
+        (water ? '\nvarying vec2 vWaterUv; uniform sampler2D waterNormalB; uniform float waterTime, waterFront; uniform vec3 waterWaveA, waterWaveB; uniform vec2 waterRotB;' : ''))
+      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${VOX_LIGHT}` +
+        (water ? '\nfloat waterF = 0.02 + 0.98 * pow(1.0 - saturate(dot(normal, geometryViewDir)), 5.0);\nreflectedLight.directDiffuse *= 1.0 - waterF; reflectedLight.indirectDiffuse *= 1.0 - waterF;' : ''))
+      .replace('#include <opaque_fragment>', '#include <opaque_fragment>' + (water ? '\ngl_FragColor.a = mix(diffuseColor.a * waterFront, 1.0, waterF);' : ''))
+      .replace('#include <tonemapping_fragment>', `${VOX_FOG}\n#include <tonemapping_fragment>`)
+      .replace('#include <fog_fragment>', '');
+    if (water) sh.fragmentShader = sh.fragmentShader.replace('#include <normal_fragment_maps>', WATER_NORMAL);
   };
-  mat.customProgramCacheKey = () => (perVertex ? 'vox-vertex' : 'vox-uniform') + spec;
+  mat.customProgramCacheKey = () => (perVertex ? 'vox-vertex' : 'vox-uniform') + spec + (wind || '') + (water ? 'water' : '');
   return mat;
 }
-// light at an entity's cell, as (ao, sky light, block light, 1)
-function cellVox(x, y, z, v) { x = Math.floor(x); y = Math.floor(y); z = Math.floor(z); return v.set(1, skyLight(getSky(x, y, z)), levelLight(getLight(x, y, z)), 1); }
+// light at an entity's cell, as (ao, sky light, block light, blocks of water above)
+function cellVox(x, y, z, v) {
+  x = Math.floor(x); y = Math.floor(y); z = Math.floor(z);
+  let w = 0; while (w < 16 && getBlock(x, y + w, z) === B.WATER) w++;
+  return v.set(1, skyLight(getSky(x, y, z)), levelLight(getLight(x, y, z)), w);
+}
 
 // ---------- block materials: one PBR material per texture tile (no atlas, so mipmaps never bleed between tiles) ----------
 // The maps come from blocktex.js: albedo (sRGB), tangent-space normal (Sobel of the height field) and ORM
@@ -124,16 +202,31 @@ function tileMaterial(tile, perVertex, vox) {
   if (t.emissive) { m.emissiveMap = t.emissive; m.emissive.setRGB(1, 1, 1); m.emissiveIntensity = s.emissive; }
   if (s.cutout) { m.alphaTest = .5; m.alphaToCoverage = true; } // with MSAA the cut-out edges are smoothed instead of stair-stepped
   if (s.transparent) { m.transparent = true; m.depthWrite = false; }
-  return patchVoxel(m, perVertex, vox, s.spec ?? LIGHTING.terrainSpecular);
+  // leaves are seen from inside the canopy too; their shadows come from the far side, so lit faces don't shadow themselves
+  if (s.sway === 'all') { m.side = THREE.DoubleSide; m.shadowSide = THREE.BackSide; }
+  return patchVoxel(m, perVertex, vox, s.spec ?? LIGHTING.terrainSpecular, { wind: perVertex ? s.sway : null });
 }
-const CHUNK_MATS = TILE_NAMES.map((n, t) => tileMaterial(t, true));
-CHUNK_MATS[T.WATER].side = THREE.DoubleSide; // the surface is also seen from below while swimming
+// a second, finer ripple normal map for the water (the first is the water tile's own)
+const WATER_NORMAL_B = (() => {
+  const n = tileNoise(331), L = newLayers();
+  each(L, (u, v, p) => { p.h = .5 + .3 * tfbm(n, u, v, 3, 4, 5) + .12 * Math.sin((u * 4 + tfbm(n, u, v, 2, 2) * .8) * Math.PI * 2); });
+  return tileTexture(bakeLayers(L, { bump: 1.6 }).normal, false);
+})();
+// the water surface: its own clear material (no albedo texture), lit like terrain, reflecting the baked sky
+function waterMaterial() {
+  const W = LIGHTING.water, m = new THREE.MeshStandardMaterial({
+    color: W.color, transparent: true, opacity: W.opacity, roughness: W.roughness, metalness: 0, normalMap: TILE_TEX[T.WATER].normal,
+    side: THREE.DoubleSide, depthWrite: false, vertexColors: true, envMapIntensity: W.reflect,
+  });
+  return patchVoxel(m, true, null, 1, { water: true });
+}
+const CHUNK_MATS = TILE_NAMES.map((n, t) => tileMaterial(t, true)), WATER_MAT = waterMaterial();
 // the chunk shadow twins draw all opaque faces with this one material (index SHADOW_SOLID), cut-outs with their tile material
 const SHADOW_SOLID = TILE_NAMES.length, SHADOW_MATS = [...CHUNK_MATS, new THREE.MeshBasicMaterial()];
-// water and lava drift: their textures scroll in world space
+// water ripples (in the shader) and lava drift (texture offsets) move in world space; the wind clock drives grass and leaves
 function scrollFluids(t) {
-  const w = TILE_TEX[T.WATER], l = TILE_TEX[T.LAVA];
-  w.map.offset.set(t * .011, t * .007); w.normal.offset.set(-t * .023, t * .017); w.orm.offset.copy(w.map.offset);
+  VOX.waterTime.value = t; VOX.windTime.value = t * LIGHTING.wind.speed;
+  const l = TILE_TEX[T.LAVA];
   l.map.offset.set(t * .006, -t * .004); l.normal.offset.copy(l.map.offset); l.orm.offset.copy(l.map.offset); l.emissive.offset.copy(l.map.offset);
 }
 
@@ -159,6 +252,7 @@ let envTarget = null, envTimer = 0;
 function bakeEnvironment() {
   const rt = pmrem.fromScene(envScene, 0, 0.1, 1000);
   scene.environment = handScene.environment = rt.texture;
+  WATER_MAT.envMap = rt.texture; // its own env map, so the reflection keeps full strength (envMapIntensity) instead of scene.environmentIntensity
   if (envTarget) envTarget.dispose();
   envTarget = rt;
 }
@@ -229,68 +323,46 @@ const hemiLight = new THREE.HemisphereLight(LIGHTING.hemiSky, LIGHTING.hemiGroun
 const SHADOW = { on: true };
 function setShadowQuality(on) { SHADOW.on = on; sunLight.castShadow = on; VOX.cloudShadow.value = on ? LIGHTING.cloudShadow : 0; }
 
-// ---------- 3D clouds: one 64x64 cell tile of extruded boxes, repeated around the player ----------
-const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, depthWrite: true });
-cloudMat.userData.fade = { value: new THREE.Vector2(160, 480) };
-cloudMat.onBeforeCompile = sh => {
-  sh.uniforms.cloudFade = cloudMat.userData.fade;
-  sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vCloudPos;').replace('#include <project_vertex>', '#include <project_vertex>\nvCloudPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
-  sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vCloudPos; uniform vec2 cloudFade;')
-    .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.a *= 1.0 - smoothstep(cloudFade.x, cloudFade.y, length(vCloudPos.xz - cameraPosition.xz));');
-};
-const cloudGroup = new THREE.Group(); scene.add(cloudGroup);
-const cloudTiles = [], cloudBits = new Uint8Array(CLOUD_N * CLOUD_N);
-const cloudAt = (i, j) => cloudBits[((j + CLOUD_N) % CLOUD_N) * CLOUD_N + ((i + CLOUD_N) % CLOUD_N)];
-function buildCloudGeometry() {
-  const P = [], Nm = [], Ix = [];
-  for (let j = 0; j < CLOUD_N; j++) for (let i = 0; i < CLOUD_N; i++) {
-    if (!cloudAt(i, j)) continue;
-    for (const f of FACES) {
-      const [dx, dy, dz] = f.dir;
-      if (!dy && cloudAt(i + dx, j + dz)) continue; // side hidden by the next cloud cell
-      const b = P.length / 3;
-      for (const c of f.c) { P.push((i + c[0]) * CLOUD_CELL, c[1] * CLOUD_THICK, (j + c[2]) * CLOUD_CELL); Nm.push(dx, dy, dz); }
-      Ix.push(b, b + 1, b + 2, b + 2, b + 1, b + 3);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(Nm, 3));
-  g.setIndex(Ix); g.computeBoundingSphere(); return g;
+// ---------- clouds: two noise planes drifting at different speeds, lit by the sun and sky ----------
+const CLOUD_COL = { lit: { value: new THREE.Color() }, shade: { value: new THREE.Color() }, sunDir: { value: new THREE.Vector3() }, fade: { value: LIGHTING.clouds.fade } };
+function cloudLayer(i) {
+  const m = new THREE.ShaderMaterial({
+    uniforms: Object.assign({}, CLOUD_U, { uLit: CLOUD_COL.lit, uShade: CLOUD_COL.shade, uSunDir: CLOUD_COL.sunDir, uFade: CLOUD_COL.fade }),
+    vertexShader: `varying vec3 vW; void main() { vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+    fragmentShader: `${CLOUD_PARS}
+uniform vec3 uLit, uShade, uSunDir; uniform float uFade; varying vec3 vW;
+void main() {
+  float a = ${i ? 'cloudB' : 'cloudA'}(vW.xz, 0.0);
+  if (a < 0.004) discard;
+  float thick = smoothstep(0.25, 1.0, a / ${i ? 'cloudAlpha.y' : 'cloudAlpha.x'});
+  vec3 v = normalize(vW - cameraPosition);
+  float glow = pow(max(dot(v, uSunDir), 0.0), 6.0) * (1.0 - thick);                 // thin edges light up toward the sun
+  vec3 c = mix(uLit, uShade, thick * 0.7) + uLit * glow * 0.8;
+  float fade = 1.0 - smoothstep(uFade * 0.45, uFade, length(vW.xz - cameraPosition.xz));
+  gl_FragColor = vec4(c, a * fade);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2), m);
+  mesh.scale.setScalar(LIGHTING.clouds.fade); mesh.frustumCulled = false; mesh.renderOrder = 3 + i;
+  scene.add(mesh); return mesh;
 }
-function paintClouds(seed) {
-  const n = new Perlin(seed + 99);
-  for (let j = 0; j < CLOUD_N; j++) for (let i = 0; i < CLOUD_N; i++) {
-    const a = i / CLOUD_N * Math.PI * 2, b = j / CLOUD_N * Math.PI * 2; // tileable via torus mapping
-    const v = n.noise(Math.cos(a) * 2 + 9, Math.sin(a) * 2 + Math.cos(b) * 2, Math.sin(b) * 2) + .5 * n.noise(Math.cos(a) * 5, Math.sin(a) * 5 + Math.cos(b) * 5, Math.sin(b) * 5 + 3);
-    cloudBits[j * CLOUD_N + i] = v > .18 ? 1 : 0;
-  }
-  // shadow mask: the cloud cells upscaled 4x and blurred so cloud shadows get soft edges
-  const R = CLOUD_SHADOW_RES, k = R / CLOUD_N;
-  let m = new Float32Array(R * R);
-  for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) m[y * R + x] = cloudBits[((y / k) | 0) * CLOUD_N + ((x / k) | 0)];
-  for (let pass = 0; pass < 2; pass++) {
-    const o = new Float32Array(R * R);
-    for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) { let s = 0; for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) s += m[((y + dy + R) % R) * R + ((x + dx + R) % R)]; o[y * R + x] = s / 25; }
-    m = o;
-  }
-  const ctx = cloudCanvas.getContext('2d'), img = ctx.createImageData(R, R);
-  for (let i = 0; i < R * R; i++) { img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = 255; img.data[i * 4 + 3] = Math.round(m[i] * 255); }
-  ctx.putImageData(img, 0, 0); cloudShadowTex.needsUpdate = true;
-  const geo = buildCloudGeometry();
-  if (cloudTiles.length) cloudTiles[0].geometry.dispose();
-  while (cloudTiles.length) cloudGroup.remove(cloudTiles.pop());
-  for (let i = 0; i < 9; i++) { const mm = new THREE.Mesh(geo, cloudMat); mm.renderOrder = 3; cloudGroup.add(mm); cloudTiles.push(mm); }
-}
+const cloudLayers = [cloudLayer(0), cloudLayer(1)];
+// each world starts with its own cloud pattern
+function paintClouds(seed) { const r = mulberry32(seed + 99); CLOUD_U.cloudOffA.value.set(r() * 4096, r() * 4096); CLOUD_U.cloudOffB.value.set(r() * 4096, r() * 4096); }
 
 // ---------- day / night ----------
-const WATER_FOG = new THREE.Color(0.012, 0.05, 0.14), LAVA_FOG = new THREE.Color(0.9, 0.18, 0.01);
+const WATER_FOG = new THREE.Color(...LIGHTING.underwater.color), LAVA_FOG = new THREE.Color(0.9, 0.18, 0.01);
 const C = {
   sunNoon: col(LIGHTING.sunNoonColor), sunLow: col(LIGHTING.sunLowColor), moon: col(LIGHTING.moonColor),
   hemiSky: col(LIGHTING.hemiSky), hemiGround: col(LIGHTING.hemiGround), hemiDusk: col(LIGHTING.hemiDuskSky),
   hemiNightSky: col(LIGHTING.hemiNightSky), hemiNightGround: col(LIGHTING.hemiNightGround),
+  cloudSunset: col(LIGHTING.clouds.sunset), cloudDusk: col(LIGHTING.clouds.dusk),
 };
 const sunDir = new THREE.Vector3(0, 1, 0), lightDir = new THREE.Vector3(0, 1, 0), _tc = new THREE.Color();
-let wind = 0, sunStrength = 0, starClock = 0;
+let sunStrength = 0, starClock = 0;
 // returns daylight 0.16..1 (gameplay brightness used by mob spawning) and updates sky, lights and clouds
 function updateEnvironment(dt, t, eye, inFluid, nightVision) {
   const ang = t * Math.PI * 2, sunH = Math.sin(ang);
@@ -316,10 +388,19 @@ function updateEnvironment(dt, t, eye, inFluid, nightVision) {
   const ambientK = 0.4 + 0.6 * smooth(0.02, 0.45, sy); // diffuse sky light is weaker when the sun is low
   hemiLight.intensity = lerp(dayF, LIGHTING.hemiNight, LIGHTING.hemi * ambientK) + nightVision * 0.8;
   scene.environmentIntensity = handScene.environmentIntensity = LIGHTING.envIntensity * ambientK; // (three uses this, not material.envMapIntensity, for scene.environment)
-  // haze over distant terrain; underwater and in lava it becomes a short coloured fog
-  const hz = VOX;
-  if (inFluid) { hz.hazeOverride.value = 1; hz.hazeColor.value.copy(inFluid === B.WATER ? WATER_FOG : LAVA_FOG); hz.hazeNear.value = inFluid === B.WATER ? 1 : .1; hz.hazeFar.value = inFluid === B.WATER ? 18 + nightVision * 30 : 2.5; }
-  else { hz.hazeOverride.value = 0; hz.hazeNear.value = renderDist * CS * LIGHTING.hazeStart; hz.hazeFar.value = renderDist * CS * LIGHTING.hazeEnd; }
+  // fog: FogExp2 whose density follows the render distance, coloured by the sky; underwater and in lava a short coloured fog
+  const hz = VOX, D = renderDist * CS, far = inFluid === B.WATER ? LIGHTING.underwater.far * (1 + nightVision) : inFluid ? 6 : 2000;
+  if (inFluid) {
+    const water = inFluid === B.WATER;
+    hz.hazeOverride.value = 1; hz.hazeColor.value.copy(water ? WATER_FOG : LAVA_FOG); scene.fog.color.copy(hz.hazeColor.value);
+    scene.fog.density = water ? LIGHTING.underwater.density / (1 + nightVision * 1.5) : 0.9;
+    hz.fogFadeNear.value = far * 0.6; hz.fogFadeFar.value = far;
+  } else {
+    hz.hazeOverride.value = 0; scene.fog.color.copy(hemiLight.color).multiplyScalar(hemiLight.intensity); // (the shader takes the actual sky colour per pixel)
+    scene.fog.density = Math.sqrt(-Math.log(1 - LIGHTING.fogEdge)) / D;
+    hz.fogFadeNear.value = D * LIGHTING.fogFadeStart; hz.fogFadeFar.value = D;
+  }
+  if (camera.far !== far) { camera.far = far; camera.updateProjectionMatrix(); } // underwater the view distance shrinks
   sky.visible = !inFluid;
   if (inFluid) renderer.setClearColor(hz.hazeColor.value); else renderer.setClearColor(0x000000);
   // bake the sky into the environment map every few seconds (more often while time runs fast)
@@ -330,13 +411,18 @@ function updateEnvironment(dt, t, eye, inFluid, nightVision) {
   stars.position.copy(eye); stars.rotation.z = ang;
   moon.position.copy(eye).addScaledVector(sunDir, -900); moon.lookAt(eye);
   moonMat.opacity = smooth(-0.05, 0.08, moonY) * (1 - 0.75 * dayF); moon.visible = !inFluid && moonMat.opacity > 0.01;
-  // clouds drift with the wind, tiled around the player; a little self-glow keeps their undersides soft
-  wind += dt * 1.6; VOX.cloudOffset.value.set(wind, 0);
-  cloudGroup.visible = !inFluid;
-  const tx = Math.floor((eye.x - wind) / CLOUD_TILE), tz = Math.floor(eye.z / CLOUD_TILE);
-  let k = 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) cloudTiles[k++].position.set((tx + a) * CLOUD_TILE + wind, CLOUD_Y, (tz + b) * CLOUD_TILE);
-  cloudMat.emissive.copy(hemiLight.color).multiplyScalar(0.12 * dayF + 0.01);
-  cloudMat.userData.fade.value.set(120 + renderDist * 8, 360 + renderDist * 20);
+  // clouds: each layer drifts at its own speed (the cloud shadows follow the same offsets); the lit side takes the
+  // sun's colour and strength, the underside the sky light, tinted orange and pink around sunset
+  const CL = LIGHTING.clouds;
+  CLOUD_U.cloudOffA.value.x -= CL.speed[0][0] * dt; CLOUD_U.cloudOffA.value.y -= CL.speed[0][1] * dt;
+  CLOUD_U.cloudOffB.value.x -= CL.speed[1][0] * dt; CLOUD_U.cloudOffB.value.y -= CL.speed[1][1] * dt;
+  cloudLayers.forEach((m, i) => { m.visible = !inFluid; m.position.set(eye.x, CL.y[i], eye.z); });
+  const evening = warm * dayF;
+  CLOUD_COL.lit.value.copy(sunLight.color).multiplyScalar(sunLight.intensity * (useSun ? 0.32 : 0.6)).lerp(_tc.copy(C.cloudSunset).multiplyScalar(sunLight.intensity * 0.32), evening * 0.5)
+    .add(_tc.copy(hemiLight.color).multiplyScalar(hemiLight.intensity * 0.45));
+  CLOUD_COL.shade.value.copy(hemiLight.color).multiplyScalar(hemiLight.intensity * 0.55).add(_tc.copy(sunLight.color).multiplyScalar(sunLight.intensity * 0.06));
+  CLOUD_COL.shade.value.lerp(_tc.copy(C.cloudDusk).multiplyScalar(0.12 + 0.25 * sunLight.intensity), evening * 0.6);
+  CLOUD_COL.sunDir.value.copy(useSun ? sunDir : lightDir);
   return daylight;
 }
 
@@ -367,10 +453,10 @@ function updateSunShadow(px, py, pz, yaw, hv, showBody) {
 }
 
 // ---------- selection & breaking overlay ----------
-const selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.004, 1.004, 1.004)), new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6 }));
+const selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.004, 1.004, 1.004)), new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6, fog: false }));
 selBox.visible = false; scene.add(selBox);
 const crackTex = new THREE.CanvasTexture(crackCanvas); crackTex.magFilter = crackTex.minFilter = THREE.NearestFilter; crackTex.generateMipmaps = false; crackTex.repeat.set(.1, 1);
-const crackMesh = new THREE.Mesh(new THREE.BoxGeometry(1.006, 1.006, 1.006), new THREE.MeshBasicMaterial({ map: crackTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+const crackMesh = new THREE.Mesh(new THREE.BoxGeometry(1.006, 1.006, 1.006), new THREE.MeshBasicMaterial({ map: crackTex, transparent: true, depthWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
 crackMesh.visible = false; scene.add(crackMesh);
 function showCrack(x, y, z, stage) {
   if (stage < 0) { crackMesh.visible = false; return; }
@@ -406,7 +492,7 @@ const disposeMats = list => new Set(list).forEach(m => m.dispose());
 const shadedBox = (w, h, d) => new THREE.BoxGeometry(w, h, d);
 const itemTexCache = {}, flatMatCache = {};
 function itemTexture(id) { if (!itemTexCache[id]) { const t = new THREE.CanvasTexture(ITEM16[id]); t.colorSpace = THREE.SRGBColorSpace; t.magFilter = t.minFilter = THREE.NearestFilter; t.generateMipmaps = false; itemTexCache[id] = t; } return itemTexCache[id]; }
-const dropVox = { value: new THREE.Vector4(1, 1, 0, 1) }, handVox = { value: new THREE.Vector4(1, 1, 0, 1) };
+const dropVox = { value: new THREE.Vector4(1, 1, 0, 0) }, handVox = { value: new THREE.Vector4(1, 1, 0, 0) };
 // flat sprites: pixel-art items, or a plant / torch / ladder block shown with its own PBR tile
 function flatMat(id, vox) {
   const m = isPlaceable(id) ? tileMaterial(BLOCKS[id].tiles[0], false, vox) : patchVoxel(new THREE.MeshStandardMaterial({ map: itemTexture(id), alphaTest: .5, roughness: .8 }), false, vox);
@@ -419,7 +505,7 @@ const cachedBlockGeo = id => blockGeoCache[id] || (blockGeoCache[id] = blockGeom
 
 // ---------- particles ----------
 const MAXP = 500;
-const pMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.11, 0.11, 0.11), new THREE.MeshBasicMaterial({ color: 0xffffff }), MAXP);
+const pMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.11, 0.11, 0.11), new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false }), MAXP);
 pMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); pMesh.frustumCulled = false;
 { const c = new THREE.Color(1, 1, 1); for (let i = 0; i < MAXP; i++) pMesh.setColorAt(i, c); }
 pMesh.count = 0; scene.add(pMesh);
@@ -485,3 +571,24 @@ function updateHand(dt, hv, onGround, eye, using) {
   handHemi.color.copy(hemiLight.color); handHemi.groundColor.copy(hemiLight.groundColor); handHemi.intensity = hemiLight.intensity;
 }
 const _hq = new THREE.Quaternion();
+
+// ---------- frame output: world, held item, underwater wobble, then tone mapping and sRGB in the output pass ----------
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
+const worldPass = new RenderPass(scene, camera), handPass = new RenderPass(handScene, handCam);
+handPass.clear = false; handPass.clearDepth = true;
+const wobblePass = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uAmount: { value: LIGHTING.underwater.wobble } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uTime, uAmount; varying vec2 vUv;
+void main() {
+  vec2 o = vec2(sin(vUv.y * 23.0 + uTime * 2.1) + sin(vUv.y * 9.0 - uTime * 1.3) * 0.5, cos(vUv.x * 19.0 + uTime * 1.7)) * uAmount;
+  gl_FragColor = texture2D(tDiffuse, clamp(vUv + o, 0.001, 0.999));
+}`,
+});
+composer.addPass(worldPass); composer.addPass(handPass); composer.addPass(wobblePass); composer.addPass(new OutputPass());
+function resizeOutput() { composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(innerWidth, innerHeight); }
+resizeOutput();
+function renderFrame(dt, showHand, underwater) {
+  handPass.enabled = showHand; wobblePass.enabled = underwater; wobblePass.uniforms.uTime.value += dt;
+  composer.render(dt);
+}

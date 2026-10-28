@@ -108,9 +108,7 @@ function frame(now) {
   if ((uiTick -= dt) <= 0) { uiTick = .25; renderEffects(); updateTouchButtons(); }
 
   updateSunShadow(player.pos.x, player.pos.y, player.pos.z, player.yaw, hv, !player.dead);
-  renderer.clear();
-  renderer.render(scene, camera);
-  if (mode === 'play' && !player.dead) { renderer.clearDepth(); renderer.render(handScene, handCam); }
+  renderFrame(dt, mode === 'play' && !player.dead, player.eyeFluid === B.WATER);
 
   if (showDebug) {
     const f = ((Math.round(-player.yaw / (Math.PI / 2)) % 4) + 4) % 4, px = Math.floor(player.pos.x), py = Math.floor(player.pos.y), pz = Math.floor(player.pos.z);
@@ -120,7 +118,7 @@ function frame(now) {
   }
   if (saveDirty && now - lastSave > 5000 && mode !== 'menu') { lastSave = now; save(); }
 }
-addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = handCam.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); handCam.updateProjectionMatrix(); });
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); resizeOutput(); camera.aspect = handCam.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); handCam.updateProjectionMatrix(); });
 addEventListener('pagehide', () => save());
 document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
 requestAnimationFrame(frame);

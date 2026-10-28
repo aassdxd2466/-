@@ -24,8 +24,9 @@ function regionTint(X, Z, k, out) {
   out[0] *= 1 + (c[0] - 1) * a; out[1] *= 1 + (c[1] - 1) * a; out[2] *= 1 + (c[2] - 1) * a;
 }
 function buildMesh(ch) {
-  // per mesh: positions, uvs, light (ao, sky, block, one-sided), normals, tint colours, and index lists per texture tile
-  const S = { P: [], U: [], L: [], N: [], C: [], I: {} }, W = { P: [], U: [], L: [], N: [], C: [], I: {} };
+  // per mesh: positions, uvs, light (ao, sky, block, water above), normals, tint colours, and index lists per texture tile.
+  // S: opaque and cut-out blocks, W: the water surface (its own transparent mesh), G: glass and ice
+  const mk = () => ({ P: [], U: [], L: [], N: [], C: [], I: {} }), S = mk(), W = mk(), G = mk();
   const ox = ch.cx * CS, oz = ch.cz * CS, d = ch.data, md = ch.meta, lt = ch.light;
   const inside = (x, z) => x >= 0 && x < CS && z >= 0 && z < CS;
   const nb = (x, y, z) => { if (y < 0) return B.BEDROCK; if (y >= H) return B.AIR; return inside(x, z) ? d[(y * CS + z) * CS + x] : getBlock(ox + x, y, oz + z); };
@@ -37,6 +38,8 @@ function buildMesh(ch) {
   const quad = (A, tile, base, flip) => flip ? idx(A, tile).push(base, base + 1, base + 3, base, base + 3, base + 2) : idx(A, tile).push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
   const both = (A, tile, b) => idx(A, tile).push(b, b + 1, b + 2, b + 2, b + 1, b + 3, b, b + 2, b + 1, b + 2, b + 3, b + 1);
   const cellLight = (x, y, z) => [skyLight(sky(x, y, z)), levelLight(blk(x, y, z))];
+  // blocks of water stacked over a cell: light reaching a surface down there is absorbed on the way (blue-green, darker with depth)
+  const wdepth = (x, y, z) => { let n = 0; while (n < 16 && nb(x, y + n, z) === B.WATER) n++; return n; };
   // fluid surface height of a cell, -1 when it holds a different block
   const fh = (x, y, z, id) => { if (nb(x, y, z) !== id) return -1; if (nb(x, y + 1, z) === id) return 1; const m = nbMeta(x, y, z); return (m === 0 || m >= 8) ? 0.875 : (8 - m) / 9; };
   const cornerH = (x, y, z, cx, cz, id) => { let s = 0, n = 0; for (let a = -1; a <= 0; a++) for (let b = -1; b <= 0; b++) { const h = fh(x + cx + a, y, z + cz + b, id); if (h === 1) return 1; if (h >= 0) { s += h; n++; } } return n ? s / n : 0.875; };
@@ -93,18 +96,18 @@ function buildMesh(ch) {
           const py = c[1] ? topH(c[0], c[2]) : 0;
           A.P.push(X + c[0], y + py, Z + c[2]);
           if (f.dir[1]) A.U.push(wx + c[0], wz + c[2]); else A.U.push(f.dir[0] ? wz + c[2] : wx + c[0], y + py);
-          A.L.push(1, s, b, 1); A.N.push(...f.dir); A.C.push(1, 1, 1);
+          A.L.push(1, s, b, 0); A.N.push(...f.dir); A.C.push(1, 1, 1);
         }
         quad(A, t, base, false);
       }
       continue;
     }
-    const A = (id === B.ICE || id === B.GLASS) ? W : S, m = md[i];
+    const A = (id === B.ICE || id === B.GLASS) ? G : S, m = md[i];
     for (let fi = 0; fi < 6; fi++) {
       const f = FACES[fi], fx = x + f.dir[0], fy = y + f.dir[1], fz = z + f.dir[2], n = nb(fx, fy, fz), nd = BLOCKS[n];
       if (!nd.transparent) continue;
       if (n === id && bd.transparent) continue;
-      const tile = faceTile(bd, fi, m), base = A.P.length / 3, ao = [0, 0, 0, 0], mode = TILE_SPEC[tile].uv, h = ihash(X * 7 + fi, y * 3 + Z * 5, 9001);
+      const tile = faceTile(bd, fi, m), base = A.P.length / 3, ao = [0, 0, 0, 0], mode = TILE_SPEC[tile].uv, h = ihash(X * 7 + fi, y * 3 + Z * 5, 9001), wd = wdepth(fx, fy, fz);
       setTint(X, y, Z, tile);
       for (let k = 0; k < 4; k++) {
         const c = f.c[k], [o1, o2, o3] = f.ao[k];
@@ -117,7 +120,7 @@ function buildMesh(ch) {
         if (!s1) { ss += sky(x + o1[0], y + o1[1], z + o1[2]); bl += blk(x + o1[0], y + o1[1], z + o1[2]); cnt++; }
         if (!s2) { ss += sky(x + o2[0], y + o2[1], z + o2[2]); bl += blk(x + o2[0], y + o2[1], z + o2[2]); cnt++; }
         if (!cr && !(s1 && s2)) { ss += sky(x + o3[0], y + o3[1], z + o3[2]); bl += blk(x + o3[0], y + o3[1], z + o3[2]); cnt++; }
-        A.L.push(occl, skyLight(ss / cnt), levelLight(bl / cnt), 1); A.N.push(...f.dir);
+        A.L.push(occl, skyLight(ss / cnt), levelLight(bl / cnt), wd); A.N.push(...f.dir);
       }
       // split the quad along the brighter diagonal so uneven corners don't interpolate into a streak
       quad(A, tile, base, ao[0] + ao[3] > ao[1] + ao[2]);
@@ -131,7 +134,8 @@ function buildMesh(ch) {
     ch.mesh = new THREE.Mesh(g, CHUNK_MATS); ch.mesh.receiveShadow = true; scene.add(ch.mesh);
     ch.shadow = shadowOnly(new THREE.Mesh(shadowGeometry(g), SHADOW_MATS)); scene.add(ch.shadow);
   }
-  if (W.P.length) { ch.water = new THREE.Mesh(chunkGeometry(W), CHUNK_MATS); ch.water.receiveShadow = true; ch.water.renderOrder = 1; scene.add(ch.water); }
+  if (W.P.length) { ch.water = new THREE.Mesh(chunkGeometry(W), WATER_MAT); ch.water.receiveShadow = true; ch.water.renderOrder = 1; scene.add(ch.water); }
+  if (G.P.length) { ch.glass = new THREE.Mesh(chunkGeometry(G), CHUNK_MATS); ch.glass.receiveShadow = true; ch.glass.renderOrder = 1; scene.add(ch.glass); }
   ch.dirty = false; ch.meshed = true;
 }
 // opaque tiles first, cut-outs after, so the shadow twin can cover all opaque faces with one range
@@ -153,7 +157,7 @@ function shadowGeometry(g) {
   return s;
 }
 function disposeChunk(ch) {
-  for (const k of ['mesh', 'shadow', 'water']) if (ch[k]) { scene.remove(ch[k]); ch[k].geometry.dispose(); ch[k] = null; }
+  for (const k of ['mesh', 'shadow', 'water', 'glass']) if (ch[k]) { scene.remove(ch[k]); ch[k].geometry.dispose(); ch[k] = null; }
 }
 
 let renderDist = isTouch ? 4 : 6;

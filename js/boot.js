@@ -5,9 +5,13 @@
 // ============================================================
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 window.THREE = THREE;
-window.Sky = Sky;
+Object.assign(window, { Sky, EffectComposer, RenderPass, ShaderPass, OutputPass });
 
 const GAME_SCRIPTS = ['core', 'texlib', 'textures', 'blocktex', 'render', 'world', 'mesher', 'entities', 'player', 'ui', 'invui', 'main'];
 for (const name of GAME_SCRIPTS) {

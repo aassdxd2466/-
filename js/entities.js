@@ -117,7 +117,7 @@ function buildModel(m) {
   }
 }
 function spawnMob(type, x, y, z) {
-  const t = MOB[type], m = { type, t, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), onGround: false, yaw: Math.random() * 6.28, tYaw: 0, walk: false, vox: { value: new THREE.Vector4(1, 1, 0, 1) },
+  const t = MOB[type], m = { type, t, pos: new THREE.Vector3(x, y, z), vel: new THREE.Vector3(), onGround: false, yaw: Math.random() * 6.28, tYaw: 0, walk: false, vox: { value: new THREE.Vector4(1, 1, 0, 0) },
     timer: 0, hp: t.hp, hurt: 0, flee: 0, phase: 0, atk: 0, burn: 0, fireT: 0, g: new THREE.Group(), mats: [], legs: [], arms: null };
   m.tYaw = m.yaw; buildModel(m); scene.add(m.g); mobs.push(m); return m;
 }

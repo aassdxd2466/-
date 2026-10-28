@@ -11,7 +11,8 @@ const CO = {}, CO2 = {}, rgb = hexc;
 const TAU = Math.PI * 2;
 // opts: rough (material roughness), metal (metalness where the metal mask is 1), uv ('rot' | 'flip' | 'flipxy' | 'none'),
 // cutout, transparent, emissive (intensity), bump (normal strength), wrap (tileable edges), spec (specular scale),
-// plant (crossed quads: no normal map), tint (scale of the per-block colour variation, default 1)
+// plant (crossed quads: no normal map), tint (scale of the per-block colour variation, default 1),
+// sway ('tip': plant tops move in the wind, 'all': whole leaf blocks)
 function defTile(names, opts, gen) { for (const n of [].concat(names)) TILE_SPEC[T[n]] = Object.assign({ rough: .9, uv: 'rot', bump: 3, wrap: true, gen, name: n }, opts); }
 const memo = f => { let v = null; return () => v || (v = f()); };
 
@@ -215,9 +216,9 @@ function leafField(L, dark, light, needles) {
     }
   });
 }
-defTile('LEAVES', { rough: .7, cutout: true, bump: 2.5 }, L => leafField(L, rgb('#3a6a22'), rgb('#7aae44'), false));
-defTile('BIRCH_LEAVES', { rough: .7, cutout: true, bump: 2.5 }, L => leafField(L, rgb('#4f7d2a'), rgb('#9cc255'), false));
-defTile('SPRUCE_LEAVES', { rough: .7, cutout: true, bump: 2 }, L => leafField(L, rgb('#24452b'), rgb('#4d7d52'), true));
+defTile('LEAVES', { rough: .7, cutout: true, bump: 2.5, sway: 'all' }, L => leafField(L, rgb('#3a6a22'), rgb('#7aae44'), false));
+defTile('BIRCH_LEAVES', { rough: .7, cutout: true, bump: 2.5, sway: 'all' }, L => leafField(L, rgb('#4f7d2a'), rgb('#9cc255'), false));
+defTile('SPRUCE_LEAVES', { rough: .7, cutout: true, bump: 2, sway: 'all' }, L => leafField(L, rgb('#24452b'), rgb('#4d7d52'), true));
 
 // ---------- fluids and glass ----------
 defTile('WATER', { rough: .04, transparent: true, spec: 1, bump: 1.2 }, L => each(L, (u, v, p) => {
@@ -552,14 +553,14 @@ function leafShape(x, cx, cy, len, ang, w, c0, c1) {
   x.beginPath(); x.moveTo(0, 0); x.quadraticCurveTo(len * .45, -w, len, 0); x.quadraticCurveTo(len * .45, w, 0, 0); x.fill();
   x.strokeStyle = 'rgba(20,40,10,.5)'; x.lineWidth = 1; x.beginPath(); x.moveTo(0, 0); x.lineTo(len * .9, 0); x.stroke(); x.restore();
 }
-const plant = { rough: .7, uv: 'flip', cutout: true, plant: true };
-defTile('TALLGRASS', plant, L => paintLayers(L, 11, (x, r) => {
+const plant = { rough: .7, uv: 'flip', cutout: true, plant: true }, swaying = Object.assign({ sway: 'tip' }, plant);
+defTile('TALLGRASS', swaying, L => paintLayers(L, 11, (x, r) => {
   for (let i = 0; i < 16; i++) {
     const t = r(), dry = r() < .2;
     blade(x, 16 + r() * 96, 130, 50 + r() * 70, (r() - .5) * .9, 3 + r() * 2.5, mixc(rgb('#24401a'), rgb('#3a5e22'), t), dry ? rgb('#a8a052') : mixc(rgb('#5e8c32'), rgb('#8cb850'), t));
   }
 }));
-defTile('ROSE', plant, L => paintLayers(L, 12, (x, r) => {
+defTile('ROSE', swaying, L => paintLayers(L, 12, (x, r) => {
   stem(x, [[64, 128], [58, 90], [64, 50]], 4, '#2f5a22');
   leafShape(x, 61, 96, 30, -2.6, 8, rgb('#244a1a'), rgb('#4f8a34')); leafShape(x, 62, 80, 28, -.4, 7, rgb('#244a1a'), rgb('#4f8a34'));
   for (let i = 0; i < 4; i++) leafShape(x, 64, 50, 11, Math.PI / 2 + (i - 1.5) * .5, 3.5, rgb('#2a5020'), rgb('#4a7a30')); // sepals
@@ -570,7 +571,7 @@ defTile('ROSE', plant, L => paintLayers(L, 12, (x, r) => {
   }
   x.strokeStyle = '#5a0a14'; x.lineWidth = 1.5; x.beginPath(); for (let t = 0; t < 12; t += .2) x.lineTo(64 + Math.cos(t) * t * .45, 37 + Math.sin(t) * t * .35); x.stroke();
 }));
-defTile('DANDELION', plant, L => paintLayers(L, 13, (x, r) => {
+defTile('DANDELION', swaying, L => paintLayers(L, 13, (x, r) => {
   for (const [a, l] of [[-2.7, 34], [-.5, 30], [-2.2, 26], [-.9, 28]]) { // toothed rosette leaves
     x.save(); x.translate(64, 124); x.rotate(a); x.fillStyle = css(mixc(rgb('#2c5a1e'), rgb('#4f8a30'), r()));
     x.beginPath(); x.moveTo(0, 0); for (let s = 0; s <= 8; s++) x.lineTo(s / 8 * l, -(s % 2 ? 7 : 3) * (1 - s / 9)); for (let s = 8; s >= 0; s--) x.lineTo(s / 8 * l, (s % 2 ? 6 : 2) * (1 - s / 9)); x.fill(); x.restore();
@@ -592,7 +593,7 @@ function twig(x, px, py, a, len, w, depth, r) {
   x.strokeStyle = css(mixc(rgb('#5a3c22'), rgb('#9a7a50'), r())); x.lineWidth = w; x.lineCap = 'round'; x.beginPath(); x.moveTo(px, py); x.lineTo(ex, ey); x.stroke();
   if (depth > 0) for (const s of [-1, 1]) twig(x, ex, ey, a + s * (.35 + r() * .45), len * (.6 + r() * .2), w * .7, depth - 1, r);
 }
-defTile('DEADBUSH', plant, L => paintLayers(L, 15, (x, r) => { for (const a of [-1.9, -1.55, -1.2]) twig(x, 64, 128, a, 30, 4, 4, r); }));
+defTile('DEADBUSH', swaying, L => paintLayers(L, 15, (x, r) => { for (const a of [-1.9, -1.55, -1.2]) twig(x, 64, 128, a, 30, 4, 4, r); }));
 function mushroom(x, r, red) {
   const sg = x.createLinearGradient(56, 0, 72, 0); sg.addColorStop(0, '#b9ab90'); sg.addColorStop(.5, '#f0e6d2'); sg.addColorStop(1, '#a89a80');
   x.fillStyle = sg; x.fillRect(57, red ? 92 : 98, 14, 36);
@@ -604,7 +605,7 @@ function mushroom(x, r, red) {
 }
 defTile('MUSH_RED', Object.assign({}, plant, { rough: .5 }), L => paintLayers(L, 16, (x, r) => mushroom(x, r, true)));
 defTile('MUSH_BROWN', Object.assign({}, plant, { rough: .8 }), L => paintLayers(L, 17, (x, r) => mushroom(x, r, false)));
-defTile('SAPLING', plant, L => paintLayers(L, 18, (x, r) => {
+defTile('SAPLING', swaying, L => paintLayers(L, 18, (x, r) => {
   stem(x, [[64, 128], [60, 96], [63, 58]], 4, '#5a3c22');
   stem(x, [[62, 92], [52, 82], [44, 70]], 2.5, '#5a3c22'); stem(x, [[62, 80], [74, 70], [84, 62]], 2.5, '#5a3c22');
   for (const [cx, cy] of [[63, 56], [44, 68], [84, 60]]) for (let i = 0; i < 9; i++) leafShape(x, cx + (r() - .5) * 8, cy + (r() - .5) * 8, 12 + r() * 6, r() * TAU, 4, rgb('#2a5a1c'), rgb('#6aa240'));
