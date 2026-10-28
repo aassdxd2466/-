@@ -9,11 +9,14 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 
 window.THREE = THREE;
-Object.assign(window, { Sky, EffectComposer, RenderPass, ShaderPass, OutputPass });
+Object.assign(window, { Sky, EffectComposer, RenderPass, ShaderPass, OutputPass, GTAOPass, UnrealBloomPass, SMAAPass });
 
-const GAME_SCRIPTS = ['core', 'texlib', 'textures', 'blocktex', 'render', 'world', 'mesher', 'entities', 'player', 'ui', 'invui', 'main'];
+const GAME_SCRIPTS = ['core', 'texlib', 'textures', 'blocktex', 'render', 'world', 'meshgen', 'mesher', 'entities', 'player', 'ui', 'invui', 'main'];
 for (const name of GAME_SCRIPTS) {
   await new Promise((resolve, reject) => {
     const s = document.createElement('script');

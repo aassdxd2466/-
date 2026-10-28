@@ -36,7 +36,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: #0a0d09; col
 #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff; }
 #crosshair::before { left: 9px; top: 0; width: 2px; height: 20px; }
 #crosshair::after { left: 0; top: 9px; width: 20px; height: 2px; }
-#debug { position: absolute; top: calc(8px + env(safe-area-inset-top, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); font: 11px/1.6 ui-monospace, Menlo, monospace; background: rgba(0,0,0,.45); padding: 6px 9px; white-space: pre; font-variant-numeric: tabular-nums; }
+#perf { position: absolute; top: calc(8px + env(safe-area-inset-top, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); font: 11px/1.4 ui-monospace, Menlo, monospace; background: rgba(0,0,0,.45); padding: 3px 8px; white-space: pre; font-variant-numeric: tabular-nums; pointer-events: none; }
+#debug { position: absolute; top: calc(34px + env(safe-area-inset-top, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); font: 11px/1.6 ui-monospace, Menlo, monospace; background: rgba(0,0,0,.45); padding: 6px 9px; white-space: pre; font-variant-numeric: tabular-nums; }
 #effects { position: absolute; top: calc(10px + env(safe-area-inset-top, 0px)); z-index: 1; right: calc(10px + env(safe-area-inset-right, 0px)); display: grid; gap: 4px; justify-items: end; }
 body.touch #effects { top: calc(66px + env(safe-area-inset-top, 0px)); }
 .eff { display: flex; align-items: center; gap: 8px; background: rgba(0,0,0,.5); padding: 4px 10px 4px 6px; font-size: 12px; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
@@ -151,6 +152,7 @@ label.set output { font: 10px var(--font-pixel); color: var(--gold); }
 <div class="hud" id="hud" hidden>
   <div id="vignette"></div>
   <div id="crosshair"></div>
+  <div id="perf" aria-hidden="true"></div>
   <div id="debug" hidden></div>
   <div id="effects"></div>
   <div id="toast"></div>
@@ -184,6 +186,7 @@ label.set output { font: 10px var(--font-pixel); color: var(--gold); }
       <h2>게임</h2>
       <div class="setrow">게임 모드<div class="seg" id="modeSeg"><button type="button" data-v="survival">서바이벌</button><button type="button" data-v="creative">크리에이티브</button></div></div>
       <div class="setrow">난이도<div class="seg" id="diffSeg"><button type="button" data-v="0">평화로움</button><button type="button" data-v="1">보통</button><button type="button" data-v="2">어려움</button></div></div>
+      <div class="setrow">그래픽 품질<div class="seg" id="qualitySeg"><button type="button" data-v="low">저</button><button type="button" data-v="medium">중</button><button type="button" data-v="high">고</button></div></div>
       <div class="setrow">그림자 효과<div class="seg" id="shadowSeg"><button type="button" data-v="1">켜기</button><button type="button" data-v="0">끄기</button></div></div>
       <label class="set">노출 (화면 밝기)<output id="expOut">1.00</output><input type="range" id="exposure" min="0.5" max="1.5" step="0.05" value="1"></label>
       <label class="set">시야 거리 (청크)<output id="rdOut">6</output><input type="range" id="rd" min="2" max="12" step="1" value="6"></label>

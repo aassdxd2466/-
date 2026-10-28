@@ -52,7 +52,7 @@ function initWorld(seed, data) {
   if (data && data.v === 2 && typeof data.seed === 'number') initWorld(data.seed, data); else initWorld((Math.random() * 1e9) | 0, null);
 }
 
-let last = performance.now(), fps = 0, fpsAcc = 0, fpsN = 0, fovNow = 72, uiTick = 0;
+let last = performance.now(), fps = 0, fpsAcc = 0, fpsN = 0, fovNow = 72, uiTick = 0, perfTick = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - last) / 1000, 0.05); last = now;
@@ -109,6 +109,7 @@ function frame(now) {
 
   updateSunShadow(player.pos.x, player.pos.y, player.pos.z, player.yaw, hv, !player.dead);
   renderFrame(dt, mode === 'play' && !player.dead, player.eyeFluid === B.WATER);
+  if ((perfTick -= dt) <= 0) { perfTick = .5; $('perf').textContent = `${fps} FPS  ·  호출 ${PERF.calls}  ·  삼각형 ${(PERF.tris / 1000).toFixed(0)}K  ·  품질 ${QUALITY[quality].label}`; }
 
   if (showDebug) {
     const f = ((Math.round(-player.yaw / (Math.PI / 2)) % 4) + 4) % 4, px = Math.floor(player.pos.x), py = Math.floor(player.pos.y), pz = Math.floor(player.pos.z);
@@ -118,7 +119,7 @@ function frame(now) {
   }
   if (saveDirty && now - lastSave > 5000 && mode !== 'menu') { lastSave = now; save(); }
 }
-addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); resizeOutput(); camera.aspect = handCam.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); handCam.updateProjectionMatrix(); });
+addEventListener('resize', () => { resizeOutput(); camera.aspect = handCam.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); handCam.updateProjectionMatrix(); });
 addEventListener('pagehide', () => save());
 document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
 requestAnimationFrame(frame);

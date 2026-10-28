@@ -1,7 +1,8 @@
 'use strict';
 // ============================================================
 //  Rendering: renderer, physically based light, sky, day/night,
-//  sun shadows, clouds, particles, held item
+//  sun shadows, water, wind, clouds, fog, particles, held item,
+//  post-processing and quality presets
 // ============================================================
 // Tunable look. Colours are written as sRGB hex; intensities are physical light units.
 const LIGHTING = {
@@ -29,7 +30,8 @@ const LIGHTING = {
     cover: [0.5, 0.56], soft: [0.22, 0.3], alpha: [0.95, 0.65], fade: 900,   // coverage threshold, edge softness, opacity, fade-out distance
     sunset: '#ff9a62', dusk: '#e58aa6',            // evening tint of the lit side and of the shaded underside
   },
-  shadowSize: isTouch ? 2048 : 4096, shadowRange: 60, shadowBias: -0.0005, shadowNormalBias: 0.02, shadowRadius: 3,
+  shadowSize: 2048, shadowRange: 60,               // (the shadow map size follows the quality preset)
+  shadowBias: -0.0005, shadowNormalBias: 0.02, shadowRadius: 3,
   sky: { turbidity: 8, rayleigh: 2.5, mieCoefficient: 0.005, mieDirectionalG: 0.8 },
   torch: [1.0, 0.62, 0.32], torchIntensity: 1.7,   // block light (torches, lava, glowstone) colour and strength
   caveAmbient: 0.02, cloudShadow: 0.55, stars: 3500,
@@ -148,6 +150,14 @@ const WATER_NORMAL = `{
   mapN.xy *= normalScale;
   normal = normalize(tbn * mapN);
 }`;
+// alpha cut-outs keep their coverage in the distance: smaller mips average leaf and gap into alpha < 0.5, so a far canopy
+// would fall apart into specks; alpha is raised with the mip level instead
+const CUTOUT_MIP = `#ifdef USE_MAP
+{
+  vec2 ts = vec2(textureSize(map, 0)), mdx = dFdx(vMapUv * ts), mdy = dFdy(vMapUv * ts);
+  diffuseColor.a *= 1.0 + max(0.0, 0.5 * log2(max(dot(mdx, mdx), dot(mdy, mdy)))) * 0.25;
+}
+#endif`;
 function patchVoxel(mat, perVertex, voxUniform, spec = LIGHTING.terrainSpecular, opts = {}) {
   mat.fog = true;
   const vu = voxUniform || { value: new THREE.Vector4(1, 1, 0, 0) };
@@ -171,8 +181,9 @@ function patchVoxel(mat, perVertex, voxUniform, spec = LIGHTING.terrainSpecular,
       .replace('#include <tonemapping_fragment>', `${VOX_FOG}\n#include <tonemapping_fragment>`)
       .replace('#include <fog_fragment>', '');
     if (water) sh.fragmentShader = sh.fragmentShader.replace('#include <normal_fragment_maps>', WATER_NORMAL);
+    if (mat.alphaTest > 0) sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>\n${CUTOUT_MIP}`);
   };
-  mat.customProgramCacheKey = () => (perVertex ? 'vox-vertex' : 'vox-uniform') + spec + (wind || '') + (water ? 'water' : '');
+  mat.customProgramCacheKey = () => (perVertex ? 'vox-vertex' : 'vox-uniform') + spec + (wind || '') + (water ? 'water' : '') + (mat.alphaTest > 0 ? 'cut' : '');
   return mat;
 }
 // light at an entity's cell, as (ao, sky light, block light, blocks of water above)
@@ -248,13 +259,20 @@ const sky = makeSky(true); scene.add(sky);
 // the environment map is baked from a copy of the sky without the sun disc (the sun is the directional light)
 const envScene = new THREE.Scene(), envSky = makeSky(false); envScene.add(envSky);
 const pmrem = new THREE.PMREMGenerator(renderer);
+// the sky is rendered into one cube target and prefiltered into one PMREM target, both reused on every bake: no GPU
+// allocations, and materials keep the same environment texture, so a bake never forces a material refresh (no hitch)
+const envCubeRT = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType }), envCubeCam = new THREE.CubeCamera(0.1, 1000, envCubeRT);
 let envTarget = null, envTimer = 0;
 function bakeEnvironment() {
-  const rt = pmrem.fromScene(envScene, 0, 0.1, 1000);
-  scene.environment = handScene.environment = rt.texture;
-  WATER_MAT.envMap = rt.texture; // its own env map, so the reflection keeps full strength (envMapIntensity) instead of scene.environmentIntensity
-  if (envTarget) envTarget.dispose();
-  envTarget = rt;
+  const ac = renderer.autoClear; renderer.autoClear = true;
+  envCubeCam.update(renderer, envScene);
+  renderer.autoClear = ac;
+  const first = !envTarget;
+  envTarget = pmrem.fromCubemap(envCubeRT.texture, envTarget);
+  if (first) {
+    scene.environment = handScene.environment = envTarget.texture;
+    WATER_MAT.envMap = envTarget.texture; // its own env map, so the reflection keeps full strength (envMapIntensity) instead of scene.environmentIntensity
+  }
 }
 
 // ---------- stars and moon ----------
@@ -440,7 +458,7 @@ const bodyLimbs = [];
   }
 }
 function updateSunShadow(px, py, pz, yaw, hv, showBody) {
-  const D = 250, texel = 2 * LIGHTING.shadowRange / LIGHTING.shadowSize;
+  const D = 250, texel = 2 * LIGHTING.shadowRange / sunLight.shadow.mapSize.x;
   _lc.position.copy(lightDir).multiplyScalar(D); _lc.lookAt(0, 0, 0); _lc.updateMatrixWorld(true);
   _li.copy(_lc.matrixWorld).invert();
   _sv.set(px, py, pz).applyMatrix4(_li);
@@ -464,13 +482,14 @@ function showCrack(x, y, z, stage) {
 }
 
 // ---------- geometry helpers ----------
+// accepts plain arrays or typed arrays (chunk meshes arrive from the worker as typed arrays and are used without copying)
 function makeGeo(P, U, I, Nm, extra = {}) {
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
-  g.setAttribute('normal', new THREE.Float32BufferAttribute(Nm, 3));
-  for (const k in extra) g.setAttribute(k, new THREE.Float32BufferAttribute(extra[k][0], extra[k][1]));
-  g.setIndex(I); g.computeBoundingSphere(); return g;
+  const g = new THREE.BufferGeometry(), attr = (a, n) => ArrayBuffer.isView(a) ? new THREE.BufferAttribute(a, n) : new THREE.Float32BufferAttribute(a, n);
+  g.setAttribute('position', attr(P, 3));
+  g.setAttribute('uv', attr(U, 2));
+  g.setAttribute('normal', attr(Nm, 3));
+  for (const k in extra) g.setAttribute(k, attr(extra[k][0], extra[k][1]));
+  g.setIndex(ArrayBuffer.isView(I) ? new THREE.BufferAttribute(I, 1) : I); g.computeBoundingSphere(); return g;
 }
 // a single centered cube (hand, drops, TNT): one group per face, drawn with that face's tile material
 function blockGeometry(id) {
@@ -572,23 +591,106 @@ function updateHand(dt, hv, onGround, eye, using) {
 }
 const _hq = new THREE.Quaternion();
 
-// ---------- frame output: world, held item, underwater wobble, then tone mapping and sRGB in the output pass ----------
-const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
-const worldPass = new RenderPass(scene, camera), handPass = new RenderPass(handScene, handCam);
+// ---------- post-processing: world -> GTAO -> held item -> (underwater wobble) -> bloom -> colour grading -> SMAA -> output ----------
+const POST = {
+  gtao: { blend: 0.5, radius: 0.7, thickness: 1.0, distanceExponent: 1.4, scale: 1.0, distanceFallOff: 1.0, samples: 12 }, // kept light: vertex AO already darkens corners
+  bloom: { strength: 0.3, radius: 0.4, threshold: 0.85, cap: 2.0, sky: 4.0 }, // only the sun and bright highlights glow; cap limits how far an HDR source
+  // spreads; sky pixels need this linear brightness (the sun and its glow), so a bright noon horizon doesn't haze the view
+  grade: { contrast: 1.05, saturation: 1.1, warmth: [1.03, 1.0, 0.95], vignette: 0.2 },
+};
+// one depth texture per composer buffer; GTAO reads the world's depth from it instead of rendering the scene a second time
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthTexture: new THREE.DepthTexture(1, 1) }));
+const worldPass = new RenderPass(scene, camera), handPass = new RenderPass(handScene, handCam), WORLD_DEPTH = { value: null };
+{ const render = worldPass.render.bind(worldPass); worldPass.render = (r, wb, rb, dt, mask) => { WORLD_DEPTH.value = rb.depthTexture; render(r, wb, rb, dt, mask); }; } // the world's depth, for GTAO and bloom
 handPass.clear = false; handPass.clearDepth = true;
+const gtaoPass = new GTAOPass(scene, camera, 1, 1, undefined, POST.gtao);
+gtaoPass.setGBuffer(composer.renderTarget1.depthTexture); // normals are rebuilt from depth (flat block faces suit that)
+gtaoPass.blendIntensity = POST.gtao.blend;
+const POST_STATE = { gtaoScale: 0.5 }, _cc = new THREE.Color();
+{
+  const setSize = gtaoPass.setSize.bind(gtaoPass), render = gtaoPass.render.bind(gtaoPass);
+  // half resolution on the medium preset; the unused internal normal buffer is kept tiny
+  gtaoPass.setSize = (w, h) => { setSize(Math.max(1, Math.round(w * POST_STATE.gtaoScale)), Math.max(1, Math.round(h * POST_STATE.gtaoScale))); gtaoPass.normalRenderTarget.setSize(1, 1); };
+  gtaoPass.render = (r, wb, rb, dt, mask) => {
+    gtaoPass.gtaoMaterial.uniforms.tDepth.value = gtaoPass.pdMaterial.uniforms.tDepth.value = WORLD_DEPTH.value;
+    // sky pixels are skipped by the AO shaders, so start both AO buffers white (no occlusion)
+    r.getClearColor(_cc); const ca = r.getClearAlpha(); r.setClearColor(0xffffff, 1);
+    for (const t of [gtaoPass.gtaoRenderTarget, gtaoPass.pdRenderTarget]) { r.setRenderTarget(t); r.clear(true, false, false); }
+    r.setClearColor(_cc, ca);
+    render(r, wb, rb, dt, mask);
+  };
+}
+const fullscreenVS = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }';
 const wobblePass = new ShaderPass({
   uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uAmount: { value: LIGHTING.underwater.wobble } },
-  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  vertexShader: fullscreenVS,
   fragmentShader: `uniform sampler2D tDiffuse; uniform float uTime, uAmount; varying vec2 vUv;
 void main() {
   vec2 o = vec2(sin(vUv.y * 23.0 + uTime * 2.1) + sin(vUv.y * 9.0 - uTime * 1.3) * 0.5, cos(vUv.x * 19.0 + uTime * 1.7)) * uAmount;
   gl_FragColor = texture2D(tDiffuse, clamp(vUv + o, 0.001, 0.999));
 }`,
 });
-composer.addPass(worldPass); composer.addPass(handPass); composer.addPass(wobblePass); composer.addPass(new OutputPass());
-function resizeOutput() { composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(innerWidth, innerHeight); }
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), POST.bloom.strength, POST.bloom.radius, POST.bloom.threshold);
+// The scene is still linear HDR here. The threshold is compared with the brightness as it will look on screen (exposure and
+// an ACES-like curve, like the output pass), so a bright noon sky stays below it and only the sun and highlights bloom;
+// the cap keeps an HDR source like the sun from flooding half the screen.
+bloomPass.highPassUniforms.uExposure = { value: 1 }; bloomPass.highPassUniforms.tDepth = WORLD_DEPTH;
+bloomPass.materialHighPassFilter.fragmentShader = bloomPass.materialHighPassFilter.fragmentShader
+  .replace('uniform float smoothWidth;', 'uniform float smoothWidth; uniform float uExposure; uniform sampler2D tDepth;')
+  .replace('vec4 texel = texture2D( tDiffuse, vUv );', `vec4 texel = texture2D( tDiffuse, vUv ); texel.rgb *= ${POST.bloom.cap.toFixed(2)} / max(${POST.bloom.cap.toFixed(2)}, luminance(texel.rgb));`)
+  .replace('vec4 texel = texture2D( tDiffuse, vUv );', `vec4 texel = texture2D( tDiffuse, vUv ); float skyL = luminance( texel.rgb ) * uExposure; bool isSky = texture2D( tDepth, vUv ).x >= 0.99999;`)
+  .replace('float v = luminance( texel.xyz );', 'float l = luminance( texel.xyz ) * uExposure; float v = (l * (2.51 * l + 0.03)) / (l * (2.43 * l + 0.59) + 0.14);')
+  .replace('gl_FragColor = mix( outputColor, texel, alpha );', `if (isSky) alpha *= smoothstep(${POST.bloom.sky.toFixed(2)}, ${(POST.bloom.sky * 1.5).toFixed(2)}, skyL);\n\t\t\tgl_FragColor = mix( outputColor, texel, alpha );`);
+bloomPass.highPassUniforms.smoothWidth.value = 0.05;
+// colour grading in linear light: a touch warmer, saturation and contrast around middle grey, then a soft vignette
+const gradePass = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uContrast: { value: POST.grade.contrast }, uSaturation: { value: POST.grade.saturation }, uWarm: { value: new THREE.Vector3(...POST.grade.warmth) }, uVignette: { value: POST.grade.vignette }, uAspect: { value: 1 } },
+  vertexShader: fullscreenVS,
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uContrast, uSaturation, uVignette, uAspect; uniform vec3 uWarm; varying vec2 vUv;
+void main() {
+  vec4 t = texture2D(tDiffuse, vUv);
+  vec3 c = t.rgb * uWarm;
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = max(mix(vec3(l), c, uSaturation), 0.0);
+  c = 0.18 * pow(c / 0.18, vec3(uContrast));
+  vec2 d = (vUv - 0.5) * 2.0 * vec2(sqrt(uAspect), 1.0 / sqrt(uAspect));
+  c *= 1.0 - uVignette * smoothstep(0.5, 1.6, length(d));
+  gl_FragColor = vec4(c, t.a);
+}`,
+});
+const smaaPass = new SMAAPass();
+smaaPass.clear = true; // its edge buffers must start empty each frame (the renderer doesn't auto-clear)
+for (const p of [worldPass, gtaoPass, handPass, wobblePass, bloomPass, gradePass, smaaPass, new OutputPass()]) composer.addPass(p);
+
+// ---------- quality presets ----------
+const QUALITY = {
+  low: { label: '저', shadow: 1024, dist: 4, gtao: 0, bloom: false, smaa: false, pixelRatio: () => 1 },
+  medium: { label: '중', shadow: 2048, dist: 6, gtao: 0.5, bloom: true, smaa: true, pixelRatio: () => 1 },
+  high: { label: '고', shadow: 4096, dist: 8, gtao: 1, bloom: true, smaa: true, pixelRatio: () => Math.min(devicePixelRatio, 2) },
+};
+let quality = 'medium';
+function applyQuality(name) {
+  const q = QUALITY[name] || QUALITY.medium; quality = QUALITY[name] ? name : 'medium';
+  sunLight.shadow.mapSize.set(q.shadow, q.shadow);
+  if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; } // rebuilt at the new size on the next frame
+  renderDist = q.dist; lastChunkScan = 0;
+  gtaoPass.enabled = q.gtao > 0; POST_STATE.gtaoScale = q.gtao || 0.5; bloomPass.enabled = q.bloom; smaaPass.enabled = q.smaa;
+  renderer.setPixelRatio(q.pixelRatio()); starMat.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+  resizeOutput();
+}
+function resizeOutput() {
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(innerWidth, innerHeight);
+  gradePass.uniforms.uAspect.value = innerWidth / innerHeight;
+}
 resizeOutput();
+// frame statistics for the corner readout (every render this frame: shadow map, world, post passes)
+renderer.info.autoReset = false;
+const PERF = { calls: 0, tris: 0 };
 function renderFrame(dt, showHand, underwater) {
   handPass.enabled = showHand; wobblePass.enabled = underwater; wobblePass.uniforms.uTime.value += dt;
+  bloomPass.highPassUniforms.uExposure.value = renderer.toneMappingExposure;
+  renderer.info.reset();
   composer.render(dt);
+  PERF.calls = renderer.info.render.calls; PERF.tris = renderer.info.render.triangles;
 }
