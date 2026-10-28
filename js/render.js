@@ -18,6 +18,7 @@ const LIGHTING = {
   sky: { turbidity: 8, rayleigh: 2.5, mieCoefficient: 0.005, mieDirectionalG: 0.8 },
   torch: [1.0, 0.62, 0.32], torchIntensity: 1.7,   // block light (torches, lava, glowstone) colour and strength
   caveAmbient: 0.02, cloudShadow: 0.55, stars: 3500,
+  skyFalloff: 0.8,                                 // indirect sky light kept per sky-light level below 15 (roofs, caves)
 };
 
 const canvas = $('game');
@@ -47,10 +48,11 @@ cloudShadowTex.wrapS = cloudShadowTex.wrapT = THREE.RepeatWrapping; cloudShadowT
 cloudShadowTex.magFilter = cloudShadowTex.minFilter = THREE.LinearFilter; cloudShadowTex.generateMipmaps = false;
 
 // ---------- voxel lighting patch for standard materials ----------
-// Adds to three's PBR lighting: sky access and ambient occlusion on indirect light (dark caves),
+// Adds to three's PBR lighting: the sky light level on indirect light (dark under roofs and in caves),
 // warm block light from torches, cloud shadows on direct light, and haze that fades into the sky
 // colour of the environment map in that direction. Per-vertex data comes from the mesher's
-// `light` attribute (ao, sky access, block light); entities pass the same as a uniform.
+// `light` attribute (ao, sky light, block light); entities pass the same as a uniform. Vertex AO
+// itself is already in the vertex colour (albedo); here it only occludes reflections.
 const VOX = {
   torchColor: { value: new THREE.Color().setRGB(...LIGHTING.torch).multiplyScalar(LIGHTING.torchIntensity) },
   caveAmbient: { value: LIGHTING.caveAmbient },
@@ -65,12 +67,12 @@ uniform vec2 cloudOffset; uniform sampler2D cloudMap;
 const VOX_LIGHT = `{
   vec4 vox = VOX;
   vec2 cp = vWPos.xz + lightDirW.xz * ((cloudY - vWPos.y) / max(lightDirW.y, 0.2));
-  float direct = (1.0 - texture2D(cloudMap, (cp - cloudOffset) * cloudScale).a * cloudShadow) * mix(1.0, vox.r, 0.35);
+  float direct = 1.0 - texture2D(cloudMap, (cp - cloudOffset) * cloudScale).a * cloudShadow;
   reflectedLight.directDiffuse *= direct;
   reflectedLight.directSpecular *= direct * VOX_SPEC;
-  reflectedLight.indirectDiffuse *= vox.r * vox.g;
+  reflectedLight.indirectDiffuse *= vox.g;
   reflectedLight.indirectSpecular *= vox.r * vox.g * VOX_SPEC;
-  reflectedLight.indirectDiffuse += material.diffuseColor * vox.r * (vec3(caveAmbient) + torchColor * vox.b);
+  reflectedLight.indirectDiffuse += material.diffuseColor * (vec3(caveAmbient) + torchColor * vox.b);
 }`;
 const VOX_HAZE = `{
   vec3 toFrag = vWPos - cameraPosition;
@@ -99,8 +101,8 @@ function patchVoxel(mat, perVertex, voxUniform, spec = LIGHTING.terrainSpecular)
   mat.customProgramCacheKey = () => (perVertex ? 'vox-vertex' : 'vox-uniform') + spec;
   return mat;
 }
-// light at an entity's cell, as (ao, sky access, block light, 1)
-function cellVox(x, y, z, v) { x = Math.floor(x); y = Math.floor(y); z = Math.floor(z); return v.set(1, y >= H ? 1 : skyAt(x, y, z), levelLight(getLight(x, y, z)), 1); }
+// light at an entity's cell, as (ao, sky light, block light, 1)
+function cellVox(x, y, z, v) { x = Math.floor(x); y = Math.floor(y); z = Math.floor(z); return v.set(1, skyLight(getSky(x, y, z)), levelLight(getLight(x, y, z)), 1); }
 
 // ---------- block materials: one PBR material per texture tile (no atlas, so mipmaps never bleed between tiles) ----------
 // The maps come from blocktex.js: albedo (sRGB), tangent-space normal (Sobel of the height field) and ORM
@@ -213,9 +215,16 @@ sunLight.castShadow = true;
   Object.assign(s.camera, { left: -R, right: R, top: R, bottom: -R, near: 1, far: 520 });
   s.camera.updateProjectionMatrix();
   s.bias = LIGHTING.shadowBias; s.normalBias = LIGHTING.shadowNormalBias; s.radius = LIGHTING.shadowRadius;
-  s.camera.layers.enable(2); s.camera.layers.enable(3); // layer 2: the invisible player body, layer 3: chunk shadow twins
 }
 scene.add(sunLight, sunLight.target);
+// a mesh that only draws into the sun's shadow map (chunk shadow twins, the player's body). Both passes filter by the
+// main camera's layers, so layers can't separate them; frustum culling can: only the shadow frustum accepts it.
+const SHADOW_FRUSTUM = sunLight.shadow.getFrustum();
+function shadowOnly(mesh) {
+  mesh.castShadow = true;
+  mesh.intersectsFrustum = function (f) { return f === SHADOW_FRUSTUM && THREE.Mesh.prototype.intersectsFrustum.call(this, f); };
+  return mesh;
+}
 const hemiLight = new THREE.HemisphereLight(LIGHTING.hemiSky, LIGHTING.hemiGround, LIGHTING.hemi); scene.add(hemiLight);
 const SHADOW = { on: true };
 function setShadowQuality(on) { SHADOW.on = on; sunLight.castShadow = on; VOX.cloudShadow.value = on ? LIGHTING.cloudShadow : 0; }
@@ -333,11 +342,11 @@ function updateEnvironment(dt, t, eye, inFluid, nightVision) {
 
 // ---------- sun shadow camera follows the player, snapped to whole shadow texels ----------
 const _lc = new THREE.OrthographicCamera(), _sv = new THREE.Vector3(), _li = new THREE.Matrix4();
-// the player has no visible body in first person, but it still casts a shadow (layer 2 only)
+// the player has no visible body in first person, but it still casts a shadow (shadow-only meshes)
 const shadowBody = new THREE.Group(); scene.add(shadowBody);
 const bodyLimbs = [];
 {
-  const box = (w, h, d, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial()); m.position.set(x, y, z); m.layers.set(2); m.castShadow = true; parent.add(m); return m; };
+  const box = (w, h, d, x, y, z, parent) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial()); m.position.set(x, y, z); shadowOnly(m); parent.add(m); return m; };
   box(.5, .5, .5, 0, 1.56, 0, shadowBody); box(.5, .74, .26, 0, .96, 0, shadowBody);
   for (const [x, y, w] of [[-.37, 1.32, .22], [.37, 1.32, .22], [-.13, .62, .24], [.13, .62, .24]]) {
     const pivot = new THREE.Group(); pivot.position.set(x, y, 0); shadowBody.add(pivot);

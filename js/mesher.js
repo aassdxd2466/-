@@ -2,8 +2,11 @@
 // ============================================================
 //  Chunk meshing and the load / unload queue
 // ============================================================
-const AO_CURVE = [0.5, 0.7, 0.85, 1.0];
+// vertex ambient occlusion: per corner, 0 = both sides and the diagonal blocked .. 3 = open; multiplied into the albedo
+const AO_CURVE = [0.45, 0.65, 0.85, 1.0];
 const levelLight = l => l > 0 ? Math.pow(0.82, 15 - l) : 0;
+// sky light level (may be a corner average) -> share of the indirect sky light that reaches the surface
+const skyLight = l => l > 0 ? Math.pow(LIGHTING.skyFalloff, 15 - l) : 0;
 // texture orientation per face, from a hash: 'rot' turns in 90 degree steps and mirrors, 'flip' mirrors sideways,
 // 'flipxy' mirrors on either axis, 'none' keeps the tile as painted
 function orientUV(mode, h, u, v, out) {
@@ -27,13 +30,13 @@ function buildMesh(ch) {
   const inside = (x, z) => x >= 0 && x < CS && z >= 0 && z < CS;
   const nb = (x, y, z) => { if (y < 0) return B.BEDROCK; if (y >= H) return B.AIR; return inside(x, z) ? d[(y * CS + z) * CS + x] : getBlock(ox + x, y, oz + z); };
   const nbMeta = (x, y, z) => (y < 0 || y >= H) ? 0 : inside(x, z) ? md[(y * CS + z) * CS + x] : getMeta(ox + x, y, oz + z);
-  const sky = (x, y, z) => { if (y >= H) return 1; const t = inside(x, z) ? ch.top[z * CS + x] : getTop(ox + x, oz + z); return y > t ? 1 : 0; };
+  const sky = (x, y, z) => { if (y >= H) return 15; if (y < 0) return 0; return inside(x, z) ? ch.sky[(y * CS + z) * CS + x] : getSky(ox + x, y, oz + z); };
   const blk = (x, y, z) => (y < 0 || y >= H) ? 0 : inside(x, z) ? lt[(y * CS + z) * CS + x] : getLight(ox + x, y, oz + z);
   const occ = (x, y, z) => BLOCKS[nb(x, y, z)].occ ? 1 : 0;
   const idx = (A, tile) => A.I[tile] || (A.I[tile] = []);
   const quad = (A, tile, base, flip) => flip ? idx(A, tile).push(base, base + 1, base + 3, base, base + 3, base + 2) : idx(A, tile).push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
   const both = (A, tile, b) => idx(A, tile).push(b, b + 1, b + 2, b + 2, b + 1, b + 3, b, b + 2, b + 1, b + 2, b + 3, b + 1);
-  const cellLight = (x, y, z) => [sky(x, y, z), levelLight(blk(x, y, z))];
+  const cellLight = (x, y, z) => [skyLight(sky(x, y, z)), levelLight(blk(x, y, z))];
   // fluid surface height of a cell, -1 when it holds a different block
   const fh = (x, y, z, id) => { if (nb(x, y, z) !== id) return -1; if (nb(x, y + 1, z) === id) return 1; const m = nbMeta(x, y, z); return (m === 0 || m >= 8) ? 0.875 : (8 - m) / 9; };
   const cornerH = (x, y, z, cx, cz, id) => { let s = 0, n = 0; for (let a = -1; a <= 0; a++) for (let b = -1; b <= 0; b++) { const h = fh(x + cx + a, y, z + cz + b, id); if (h === 1) return 1; if (h >= 0) { s += h; n++; } } return n ? s / n : 0.875; };
@@ -55,7 +58,7 @@ function buildMesh(ch) {
       continue;
     }
     if (bd.shape === 'torch') {
-      const m = md[i], s = sky(x, y, z), t = bd.tiles[0], a = 7 / 16, w = 2 / 16, h = 10 / 16;
+      const m = md[i], s = skyLight(sky(x, y, z)), t = bd.tiles[0], a = 7 / 16, w = 2 / 16, h = 10 / 16;
       let bx = 0, bz = 0, lx = 0, lz = 0, lift = 0;
       if (m) { const dir = FACES[m - 1].dir; bx = -dir[0] * .34; bz = -dir[2] * .34; lx = dir[0] * .3; lz = dir[2] * .3; lift = .2; }
       for (const f of FACES) {
@@ -85,7 +88,7 @@ function buildMesh(ch) {
         const fx = x + f.dir[0], fy = y + f.dir[1], fz = z + f.dir[2], n = nb(fx, fy, fz);
         if (n === id) continue;
         if (f.dir[1] !== 1 && !BLOCKS[n].transparent) continue;
-        const base = A.P.length / 3, s = sky(fx, fy, fz), b = glow ? 1 : levelLight(blk(fx, fy, fz));
+        const base = A.P.length / 3, s = skyLight(sky(fx, fy, fz)), b = glow ? 1 : levelLight(blk(fx, fy, fz));
         for (const c of f.c) {
           const py = c[1] ? topH(c[0], c[2]) : 0;
           A.P.push(X + c[0], y + py, Z + c[2]);
@@ -106,25 +109,27 @@ function buildMesh(ch) {
       for (let k = 0; k < 4; k++) {
         const c = f.c[k], [o1, o2, o3] = f.ao[k];
         A.P.push(X + c[0], y + c[1], Z + c[2]);
-        orientUV(mode, h, c[3], c[4], uv); A.U.push(uv[0], uv[1]); A.C.push(...tint);
+        orientUV(mode, h, c[3], c[4], uv); A.U.push(uv[0], uv[1]);
         const s1 = occ(x + o1[0], y + o1[1], z + o1[2]), s2 = occ(x + o2[0], y + o2[1], z + o2[2]), cr = occ(x + o3[0], y + o3[1], z + o3[2]);
-        const a = (s1 && s2) ? 0 : 3 - (s1 + s2 + cr); ao[k] = a;
+        const a = (s1 && s2) ? 0 : 3 - (s1 + s2 + cr), occl = AO_CURVE[a]; ao[k] = a;
+        A.C.push(tint[0] * occl, tint[1] * occl, tint[2] * occl);
         let ss = sky(fx, fy, fz), bl = blk(fx, fy, fz), cnt = 1;
         if (!s1) { ss += sky(x + o1[0], y + o1[1], z + o1[2]); bl += blk(x + o1[0], y + o1[1], z + o1[2]); cnt++; }
         if (!s2) { ss += sky(x + o2[0], y + o2[1], z + o2[2]); bl += blk(x + o2[0], y + o2[1], z + o2[2]); cnt++; }
         if (!cr && !(s1 && s2)) { ss += sky(x + o3[0], y + o3[1], z + o3[2]); bl += blk(x + o3[0], y + o3[1], z + o3[2]); cnt++; }
-        A.L.push(AO_CURVE[a], ss / cnt, levelLight(bl / cnt), 1); A.N.push(...f.dir);
+        A.L.push(occl, skyLight(ss / cnt), levelLight(bl / cnt), 1); A.N.push(...f.dir);
       }
+      // split the quad along the brighter diagonal so uneven corners don't interpolate into a streak
       quad(A, tile, base, ao[0] + ao[3] > ao[1] + ao[2]);
     }
   }
   disposeChunk(ch);
   if (S.P.length) {
-    // the visible mesh draws one group per tile material; a shadow-only twin (layer 3) shares its buffers and
+    // the visible mesh draws one group per tile material; a shadow-only twin shares its buffers and
     // draws every opaque tile in a single call, keeping per-tile groups only for alpha cut-outs (leaves, plants)
     const g = chunkGeometry(S);
     ch.mesh = new THREE.Mesh(g, CHUNK_MATS); ch.mesh.receiveShadow = true; scene.add(ch.mesh);
-    ch.shadow = new THREE.Mesh(shadowGeometry(g), SHADOW_MATS); ch.shadow.castShadow = true; ch.shadow.layers.set(3); scene.add(ch.shadow);
+    ch.shadow = shadowOnly(new THREE.Mesh(shadowGeometry(g), SHADOW_MATS)); scene.add(ch.shadow);
   }
   if (W.P.length) { ch.water = new THREE.Mesh(chunkGeometry(W), CHUNK_MATS); ch.water.receiveShadow = true; ch.water.renderOrder = 1; scene.add(ch.water); }
   ch.dirty = false; ch.meshed = true;
@@ -175,7 +180,7 @@ function updateChunks(now, px, pz) {
   while (genQueue.length && performance.now() - t0 < budget * .55) {
     const [, cx, cz] = genQueue.shift(), k = ck(cx, cz);
     if (chunks.has(k)) continue;
-    const ch = generateChunk(cx, cz); chunks.set(k, ch); initChunkLight(ch); flushTouched(false);
+    const ch = generateChunk(cx, cz); chunks.set(k, ch); initChunkLight(ch); initChunkSky(ch); flushTouched(false);
   }
   while (meshQueue.length && performance.now() - t0 < budget) {
     const [, ch] = meshQueue.shift();

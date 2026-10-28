@@ -135,7 +135,7 @@ function generateChunk(cx, cz) {
     if (inside) d[idx(tx, base - 1, tz)] = B.DIRT;
     maxY = Math.max(maxY, base + tr.th + 2);
   }
-  const ch = { cx, cz, data: d, meta, light: new Uint8Array(n), top: new Int16Array(L), maxY: Math.min(maxY + 1, H - 1), mesh: null, water: null, dirty: true, meshed: false };
+  const ch = { cx, cz, data: d, meta, light: new Uint8Array(n), sky: new Uint8Array(n), top: new Int16Array(L), maxY: Math.min(maxY + 1, H - 1), mesh: null, water: null, dirty: true, meshed: false };
   const e = edits.get(ck(cx, cz));
   if (e) for (const [i, v] of e.m) { d[i] = v & 255; meta[i] = v >> 8; const y = (i / L) | 0; if ((v & 255) && y >= ch.maxY) ch.maxY = Math.min(y + 1, H - 1); }
   for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) computeTop(ch, x, z);
@@ -225,6 +225,78 @@ function initChunkLight(ch) {
   propagateLight();
 }
 
+// ---------- sky light (shading only): 15 under open sky, one less per step under roofs and into caves ----------
+// Gameplay (mob spawning, burning zombies) keeps the column test skyAt(); this field only darkens indirect light in meshes.
+const skyQ = [];
+function getSky(x, y, z) { if (y >= H) return 15; if (y < 0) return 0; const ch = chunks.get(ck(x >> 4, z >> 4)); return ch ? ch.sky[(y * CS + (z & 15)) * CS + (x & 15)] : 15; }
+// a changed cell needs a remesh of its chunk once that has a mesh, and of the neighbour when it lies on a border
+function skyTouch(ch, x, z) { const lx = x & 15, lz = z & 15; if (ch.meshed || lx === 0 || lx === 15 || lz === 0 || lz === 15) touch(x, z); }
+function propagateSky() {
+  for (let qi = 0; qi < skyQ.length;) {
+    const x = skyQ[qi++], y = skyQ[qi++], z = skyQ[qi++], l = getSky(x, y, z);
+    if (l <= 1) continue;
+    for (const [dx, dy, dz] of NB6) {
+      const nx = x + dx, ny = y + dy, nz = z + dz; if (ny < 0 || ny >= H) continue;
+      const ch = chunks.get(ck(nx >> 4, nz >> 4)); if (!ch) continue;
+      const i = (ny * CS + (nz & 15)) * CS + (nx & 15);
+      if (BLOCKS[ch.data[i]].opaque || ch.sky[i] + 2 > l) continue;
+      ch.sky[i] = l - 1; skyTouch(ch, nx, nz); skyQ.push(nx, ny, nz);
+    }
+  }
+  skyQ.length = 0;
+}
+// clear the cells (given as x, y, z triples) and everything lit only through them; brighter cells at the edge relight the hole
+function removeSky(cells) {
+  const rq = [];
+  for (let k = 0; k < cells.length; k += 3) {
+    const x = cells[k], y = cells[k + 1], z = cells[k + 2], ch = chunks.get(ck(x >> 4, z >> 4)), i = (y * CS + (z & 15)) * CS + (x & 15);
+    rq.push(x, y, z, ch.sky[i]); ch.sky[i] = 0; skyTouch(ch, x, z);
+  }
+  for (let qi = 0; qi < rq.length;) {
+    const x0 = rq[qi++], y0 = rq[qi++], z0 = rq[qi++], l = rq[qi++];
+    for (const [dx, dy, dz] of NB6) {
+      const nx = x0 + dx, ny = y0 + dy, nz = z0 + dz; if (ny < 0 || ny >= H) continue;
+      const ch = chunks.get(ck(nx >> 4, nz >> 4)); if (!ch) continue;
+      const i = (ny * CS + (nz & 15)) * CS + (nx & 15), nl = ch.sky[i];
+      if (nl !== 0 && nl < l) { ch.sky[i] = 0; skyTouch(ch, nx, nz); rq.push(nx, ny, nz, nl); }
+      else if (nl >= l) skyQ.push(nx, ny, nz);
+    }
+  }
+}
+// local update after an edit: a column that got covered loses its open sky below the new block,
+// an uncovered one gets it back, and an opaque/clear swap removes or lets light through this cell
+function skyAfterChange(x, y, z, opaque, oldTop, newTop) {
+  const ch = chunks.get(ck(x >> 4, z >> 4)), dark = [];
+  for (let yy = oldTop + 1; yy <= newTop; yy++) dark.push(x, yy, z);
+  if (opaque && y <= oldTop) dark.push(x, y, z); // (above the old top it is already in the covered range)
+  if (dark.length) removeSky(dark);
+  for (let yy = newTop + 1; yy <= oldTop; yy++) { ch.sky[(yy * CS + (z & 15)) * CS + (x & 15)] = 15; skyQ.push(x, yy, z); }
+  if (!opaque) for (const [dx, dy, dz] of NB6) if (getSky(x + dx, y + dy, z + dz) > 1) skyQ.push(x + dx, y + dy, z + dz);
+  propagateSky();
+}
+function initChunkSky(ch) {
+  const ox = ch.cx * CS, oz = ch.cz * CS, s = ch.sky;
+  for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) for (let y = ch.top[z * CS + x] + 1; y < H; y++) s[(y * CS + z) * CS + x] = 15;
+  // open cells next to a higher column shine sideways under its overhangs and into cave mouths
+  for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
+    const t = ch.top[z * CS + x], X = ox + x, Z = oz + z;
+    let hi = t; for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) hi = Math.max(hi, getTop(X + dx, Z + dz));
+    for (let y = t + 1; y <= Math.min(hi + 1, H - 1); y++) skyQ.push(X, y, Z);
+  }
+  // light already in loaded neighbours flows across the border
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const nb = chunks.get(ck(ch.cx + dx, ch.cz + dz)); if (!nb) continue;
+    for (let k = 0; k < CS; k++) {
+      const lx = dx ? (dx > 0 ? 15 : 0) : k, lz = dz ? (dz > 0 ? 15 : 0) : k, nx = dx ? (dx > 0 ? 0 : 15) : k, nz = dz ? (dz > 0 ? 0 : 15) : k;
+      for (let y = 0; y <= ch.top[lz * CS + lx]; y++) {
+        const i = (y * CS + lz) * CS + lx, nl = nb.sky[(y * CS + nz) * CS + nx];
+        if (nl > s[i] + 1 && !BLOCKS[ch.data[i]].opaque) { s[i] = nl - 1; skyQ.push(ox + lx, y, oz + lz); }
+      }
+    }
+  }
+  propagateSky();
+}
+
 // ---------- editing ----------
 // block that keeps another block in place: plants sit on top, torches and ladders hang on a face
 function supportOf(x, y, z, id, meta) {
@@ -250,11 +322,13 @@ function setBlock(x, y, z, id, meta = 0, batch = false) {
   const key = ck(cx, cz); let e = edits.get(key); if (!e) { e = { cx, cz, m: new Map() }; edits.set(key, e); }
   e.m.set(i, id | (meta << 8));
   if (id && y >= ch.maxY) ch.maxY = Math.min(y + 1, H - 1);
+  const oldTop = ch.top[lz * CS + lx];
   computeTop(ch, lx, lz);
   touch(x, z); saveDirty = true;
   if (old !== id) {
     const ob = BLOCKS[old], nb = BLOCKS[id];
     if (ob.light || nb.light || ob.opaque !== nb.opaque) lightAfterChange(x, y, z, old, id);
+    if (ob.opaque !== nb.opaque || oldTop !== ch.top[lz * CS + lx]) skyAfterChange(x, y, z, nb.opaque, oldTop, ch.top[lz * CS + lx]);
     if (old === B.SAPLING) saplings.delete(posKey(x, y, z));
     // things resting on or hanging from this cell fall off
     if (!(nb.solid && !nb.transparent)) for (const [dx, dy, dz] of NB6) {

@@ -115,7 +115,7 @@ function frame(now) {
   if (showDebug) {
     const f = ((Math.round(-player.yaw / (Math.PI / 2)) % 4) + 4) % 4, px = Math.floor(player.pos.x), py = Math.floor(player.pos.y), pz = Math.floor(player.pos.z);
     $('debug').textContent = `Blockcraft  ${fps} fps\nXYZ  ${player.pos.x.toFixed(2)} / ${player.pos.y.toFixed(2)} / ${player.pos.z.toFixed(2)}\n청크 ${px >> 4}, ${pz >> 4}   로드됨 ${chunks.size}   생물군계 ${terrain(px, pz).biome}\n` +
-      `방향 ${['북', '동', '남', '서'][f]}   시간 ${String(Math.floor((time * 24 + 6) % 24)).padStart(2, '0')}:00   하늘빛 ${skyAt(px, py + 1, pz)}  블록빛 ${getLight(px, py + 1, pz)}\n` +
+      `방향 ${['북', '동', '남', '서'][f]}   시간 ${String(Math.floor((time * 24 + 6) % 24)).padStart(2, '0')}:00   하늘빛 ${getSky(px, py + 1, pz)}  블록빛 ${getLight(px, py + 1, pz)}\n` +
       `몹 ${mobs.length}  아이템 ${drops.length}  흐르는 물 ${fluidDue.size}   시드 ${SEED}${aim ? `\n보는 블록 ${BLOCKS[aim.b].name} (${aim.x}, ${aim.y}, ${aim.z})` : ''}`;
   }
   if (saveDirty && now - lastSave > 5000 && mode !== 'menu') { lastSave = now; save(); }
